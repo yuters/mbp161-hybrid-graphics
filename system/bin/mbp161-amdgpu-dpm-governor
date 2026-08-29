@@ -2,7 +2,11 @@
 # Raise the dGPU's DPM level on demand instead of pinning it.
 #
 # WHY. Measured 2026-08-29 on MacBookPro16,1 (Navi 14, 03:00.0):
-#   auto  -> SMU dead in 9s, then sdma1 ring timeout and a GPU reset. FATAL.
+#   auto  -> SMU dead in 9s, then sdma1 ring timeout and a GPU reset. FATAL --
+#            measured with the panel muxed to the iGPU and the dGPU IDLE (no
+#            outputs, no CRTC, busy=0). Not tested with the dGPU scanning out;
+#            a dGPU-primary machine reportedly runs auto fine, so the failure is
+#            conditional. Irrelevant either way: auto is ~16W, low is 4-5W.
 #   high  -> 17W cold / 25-26W warm idle, 16W with 4K live
 #   low   -> 4W idle, 8-10W with 4K live, still drives 3840x2160@60 cleanly
 # So `low` is the right idle state. Its cost is a low sclk ceiling -- the GPU
@@ -11,7 +15,7 @@
 # topology (Intel primary, AMD scanout only) nothing does, so `low` is free --
 # until someone runs DRI_PRIME=1 work. This raises to `high` when that happens.
 #
-# NEVER writes `auto`. Only the two levels proven safe on this chip.
+# NEVER writes `auto`. Only the two levels proven safe in this configuration.
 #
 # Detection note: a workload on a low-clocked GPU pegs gpu_busy_percent, so
 # under-clocking makes the signal *easier* to see, not harder.

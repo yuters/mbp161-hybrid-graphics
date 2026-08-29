@@ -8,10 +8,14 @@
 # desktop.
 #
 # The AMD GPU is only opened when DPM is already at a STATIC level.
-# power_dpm_force_performance_level=auto kills the SMU in about 9 seconds on
-# this chip, even with the GPU completely idle. mbp161-amdgpu-hybrid-prep
-# sets `low` at boot; if for any reason it did not run, this falls back to
-# Intel-only rather than opening AMD at a level that will hang the machine.
+# power_dpm_force_performance_level=auto killed the SMU in about 9 seconds in
+# this configuration -- panel muxed to the iGPU, dGPU idle. See README, "The
+# auto warning and its limits"; the failure is conditional, but nothing here
+# needs auto anyway.
+#
+# mbp161-amdgpu-hybrid-prep sets `low` at boot; if for any reason it did not
+# run, this falls back to Intel-only rather than opening AMD at a level that
+# wedged this machine.
 #
 # Export HYPR_LID_ONLY=1 before starting the session for an Intel-only session.
 

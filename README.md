@@ -57,10 +57,13 @@ buffer.
 buffer before deciding whether to import or blit.
 
 **4. Idle power, and a hard lock.** The discrete GPU idled at 25 W. The obvious
-fix — `power_dpm_force_performance_level=auto` — **hangs the machine**: it kills
-the SMU in about 9 seconds even with the GPU completely idle, no outputs, no
-CRTC, `gpu_busy_percent=0`. This is not a load problem; the DPM transition
-itself is fatal on this chip.
+fix — `power_dpm_force_performance_level=auto` — **hung the machine in this
+configuration**: the SMU stopped responding about 9 seconds after the write,
+then an SDMA ring timeout, then a GPU reset. That was measured with the panel
+muxed to the iGPU and the discrete GPU completely **idle** — USB-C unplugged, no
+outputs, no CRTC, `gpu_busy_percent=0`. So it is not a load problem, but see
+[the scope of that finding](#the-auto-warning-and-its-limits) before treating it
+as a property of the chip.
 → `system/bin/mbp161-amdgpu-hybrid-prep` pins a static `low` at boot (4-5 W, and
 still drives 4K@60 — `low` is a clock *ceiling*, not a pin).
 `system/bin/mbp161-amdgpu-dpm-governor` raises it to `high` under sustained load
@@ -115,9 +118,10 @@ works.
 
 Learned by breaking the machine.
 
-- **Never write `auto` to `power_dpm_force_performance_level`.** Nine seconds to
-  a dead SMU, then an SDMA ring timeout, then a GPU reset, then the machine is
-  gone. Idle does not save you.
+- **Do not write `auto` to `power_dpm_force_performance_level` in this
+  configuration** — see [the scope of that finding](#the-auto-warning-and-its-limits).
+  Nine seconds to a dead SMU, then an SDMA ring timeout, then a GPU reset. Being
+  idle did not save it.
 - Neither `high` nor `low` pins the clock; both are **ceilings**. Read the live
   clock from `hwmon/freq1_input`, never infer it.
 - `pp_dpm_sclk` rows change between reads milliseconds apart. It is a sample,
@@ -128,6 +132,36 @@ Learned by breaking the machine.
 - Do not measure a suspend with kernel or journal timestamps. printk does not
   advance across the sleep and journald stamps its whole backlog at flush. Use
   `CLOCK_BOOTTIME - CLOCK_MONOTONIC`.
+
+## The `auto` warning and its limits
+
+Worth stating precisely, because the warning above is easy to over-read.
+
+**What was actually tested here:** one write of `auto`, with the panel muxed to
+the iGPU by `force_igd`, the discrete GPU idle, USB-C unplugged, no outputs, no
+CRTC, `gpu_busy_percent=0`. The SMU stopped answering 9 seconds later and the
+machine needed a reboot. That is a real, reproducible failure in the topology
+this repo sets up, and it is why nothing here ever writes `auto`.
+
+**What was not tested:** `auto` with the discrete GPU actively scanning out. That
+run was planned and then cancelled on the reasoning that if `auto` kills an idle
+GPU, scanout cannot save it. That was an inference, not a measurement, and it may
+well be backwards — continuous scanout could be exactly what keeps the SMU out of
+the gated state the transition wedges.
+
+**A counter-example exists.** Another `MacBookPro16,1`, running stock kernel
+7.1.8-t2 with no patches and the panel left on the discrete GPU (firmware
+default, no `force_igd`), reports `auto` running without trouble — with the dGPU
+driving both the internal panel and the externals. That machine is not running
+the hybrid topology this repo builds; its iGPU is unused. It is second-hand and
+unverified here, but it is enough to say the failure is **conditional on
+something**, and the honest candidates are the mux position, the idle state, or
+both.
+
+**Practical upshot:** `auto` is not worth pursuing on this setup regardless. It
+measured about 16 W on that other machine, while `low` gives 4-5 W here and still
+drives 4K@60. The warning stands for this configuration; do not repeat it as a
+blanket claim about Navi 14.
 
 ## Licence
 

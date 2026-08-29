@@ -7,7 +7,8 @@ log() { echo "mbp161-hybrid-prep: $*" | tee /dev/kmsg >/dev/null 2>&1 || echo "m
 
 [ "$(id -u)" -eq 0 ] || { echo "root only" >&2; exit 1; }
 # systemd may run this before amdgpu finishes probe. Wait; do not succeed early
-# or SDDM/Hyprland can start with DPM=auto and hard-lock.
+# or the session starts with DPM still at `auto`, which wedged the SMU on this
+# machine (see README, "The auto warning and its limits").
 i=0
 while [ ! -e "$AMD/power_dpm_force_performance_level" ]; do
 	i=$((i + 1))
@@ -38,7 +39,9 @@ for conn in /sys/class/drm/${AMD_CARD}-DP-*; do
 	[ -e "$conn/status" ] || continue
 	heads="$heads $(basename "$conn")=$(cat "$conn/status")/$(cat "$conn/enabled")"
 done
-# Never write DPM=auto here. Hyprland + auto hard-locks.
+# Never write DPM=auto here. Note the failure is NOT caused by compositor load:
+# `auto` wedged the SMU with the dGPU fully idle, no outputs and busy=0. An
+# earlier "load drives DPM hard" explanation was tested and withdrawn.
 {
 	echo "armed=$(date -Is)"
 	echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
