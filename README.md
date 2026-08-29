@@ -100,7 +100,17 @@ Stated plainly, because a repo that overclaims is worse than no repo.
 idle; four consecutive real s2idle sleeps (attached and detached) with no
 errors, no reboot and unbroken uptime; sleep power measured on battery via
 `CLOCK_BOOTTIME - CLOCK_MONOTONIC`; lid-closed-while-docked keeping the external
-display alive; 26 consecutive clean boots on the gmux ordering fix.
+display alive.
+
+**On the boot count, precisely.** The gmux ordering change was measured at 26
+consecutive clean boots, but that run used hand-built modules loaded into a
+running kernel, not the packaged patch here. Across the packaged builds the
+record is 6 clean boots. The pre-fix baseline it replaced was roughly 6 good
+boots in 9. Note also that a bad boot cannot be detected by grepping the log:
+the failure is that i915 reads DPCD down the inactive AUX and *silently* drops
+the panel, so you get a black display and no error at all. Score boots by the
+panel lighting up and by the presence of `apple_gmux: Switching to IGD`, never
+by an absent error.
 
 **Not verified:** anything on a second machine, any other Apple model, any other
 kernel base, and deep S3 (`mem_sleep_default=deep`), which remains broken —
@@ -109,8 +119,16 @@ amdgpu's mode-1 reset and Titan Ridge power removal are both unfixed.
 **Known rough edges:** the monitor layout can swap sides after a lid close/open
 cycle, because the compositor re-lays-out from scratch rather than restoring the
 previous arrangement — pin positions in your compositor config if it bothers
-you. A cold boot with the USB-C cable already attached produces no hotplug event
-at all; replug after boot. `brcmfmac` logs a Wi-Fi Direct interface failure
+you. A cold boot with the USB-C cable already attached produces no hotplug event at
+all, and you must replug after boot — this is a limitation, not a bug to work
+around. On a cold boot with the Dell attached, the connector reads
+`card1-DP-5=unknown/disabled` and **no** USB devices enumerate behind the port
+either; the display's own USB hub is simply absent until the cable is replugged.
+Forcing a DRM re-detect does not help, because the link is not up to detect.
+There is no `typec` class on this machine at all (`/sys/class/typec` is empty),
+so Linux cannot observe the port's alt-mode state or ask it to renegotiate — on
+a T2 Mac the USB-C power-delivery controller is owned by the T2, not by the
+host. Absent a T2 USB-C/PD driver, a physical replug is the only trigger. `brcmfmac` logs a Wi-Fi Direct interface failure
 (`err=-52`) at boot and after every resume; it is cosmetic and the interface
 works.
 
