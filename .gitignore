@@ -1,0 +1,5 @@
+*.pkg.tar.zst
+*.ko
+*.ko.zst
+src/
+pkg/

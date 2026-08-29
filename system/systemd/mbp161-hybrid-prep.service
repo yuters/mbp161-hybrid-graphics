@@ -1,0 +1,11 @@
+[Unit]
+Description=MBP16,1 amdgpu hybrid prep (DPM low, ghost eDP off)
+DefaultDependencies=no
+After=systemd-udevd.service sysinit.target
+Before=display-manager.service graphical.target multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mbp161-amdgpu-hybrid-prep
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

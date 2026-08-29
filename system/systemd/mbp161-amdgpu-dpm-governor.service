@@ -1,0 +1,17 @@
+[Unit]
+Description=MBP16,1 amdgpu DPM governor (low when idle, high under load)
+# Must not race the prep service, which sets the initial static level.
+After=mbp161-hybrid-prep.service
+Requires=mbp161-hybrid-prep.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mbp161-amdgpu-dpm-governor
+Restart=on-failure
+RestartSec=5
+# If this dies, the GPU must be left at a safe static level, never `auto`.
+ExecStopPost=/bin/sh -c 'echo low > /sys/bus/pci/devices/0000:03:00.0/power_dpm_force_performance_level || true'
+Nice=10
+
+[Install]
+WantedBy=graphical.target

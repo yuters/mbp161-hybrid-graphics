@@ -1,0 +1,130 @@
+#!/bin/sh
+# Raise the dGPU's DPM level on demand instead of pinning it.
+#
+# WHY. Measured 2026-08-29 on MacBookPro16,1 (Navi 14, 03:00.0):
+#   auto  -> SMU dead in 9s, then sdma1 ring timeout and a GPU reset. FATAL.
+#   high  -> 17W cold / 25-26W warm idle, 16W with 4K live
+#   low   -> 4W idle, 8-10W with 4K live, still drives 3840x2160@60 cleanly
+# So `low` is the right idle state. Its cost is a low sclk ceiling -- the GPU
+# still gates off and floats (observed S/200/300MHz), it simply cannot climb
+# to 1450MHz -- which cripples anything actually rendering ON the dGPU. In the normal
+# topology (Intel primary, AMD scanout only) nothing does, so `low` is free --
+# until someone runs DRI_PRIME=1 work. This raises to `high` when that happens.
+#
+# NEVER writes `auto`. Only the two levels proven safe on this chip.
+#
+# Detection note: a workload on a low-clocked GPU pegs gpu_busy_percent, so
+# under-clocking makes the signal *easier* to see, not harder.
+#
+# Do not poll pp_dpm_sclk to infer state: consecutive reads milliseconds apart
+# return different tables (the gated `S` row comes and goes). gpu_busy_percent
+# is the stable signal.
+set -u
+
+AMD=/sys/bus/pci/devices/0000:03:00.0
+DPM=$AMD/power_dpm_force_performance_level
+BUSY=$AMD/gpu_busy_percent
+SCLK=$(ls "$AMD"/hwmon/hwmon*/freq1_input 2>/dev/null | head -1)
+
+IDLE_LEVEL=${IDLE_LEVEL:-low}
+BUSY_LEVEL=${BUSY_LEVEL:-high}
+# CONTROL-LOOP NOTE (2026-08-29, learned the hard way twice).
+#
+# gpu_busy_percent alone CANNOT drive this. Utilization is inversely related to
+# the clock being controlled, so the measurement depends on the control output:
+#
+#   mpv 1080p60 at DPM=low    busy 30-60%
+#   mpv 1080p60 at DPM=high   busy 0-14%     same work, higher ceiling
+#
+# A utilization threshold therefore oscillates: raise -> work finishes faster ->
+# looks idle -> drop -> looks busy -> raise. Observed high/low/high in 45s. No
+# threshold or moving average fixes it; the signal itself inverts.
+#
+# Fix: normalise by the live clock. index = busy% * sclk_MHz / 100, roughly
+# "effective MHz of work", which is invariant across the ceiling change:
+#
+#   idle desktop            index ~0-15
+#   mpv on the dGPU         index ~95 at high (measured), ~112 at low
+#
+# THRESHOLDS, measured not guessed. 150s of recorded idle desktop with 4K live:
+#   raw index      median 0, p90 126, p99 353, max 509  (compositing is BURSTY)
+#   rolling mean   W=10 peaks 129   W=20 peaks 84   W=30 peaks 61
+# Replaying that recording through this exact logic:
+#   W=10 raise=40 -> 1 false raise, 117 of 150 idle seconds wasted at `high`
+#   W=30 raise=85 -> 0 false raises, 0 seconds at `high`
+# Hence W=30 / raise 85 / drop 40. The 24-point gap to the idle peak of 61 is
+# the whole safety margin.
+#
+# HONEST LIMITATION. An idle 4K desktop's GPU bursts are HEAVIER than a light
+# workload's average, so this deliberately biases toward power saving: it will
+# NOT raise for something light, only for sustained heavy work. If a workload
+# feels throttled, `sudo ~/dpmlow revert` pins `high` manually, which is the
+# reliable escape hatch. The correct fix, if this ever matters, is per-process
+# /proc/PID/fdinfo `drm-engine-gfx` deltas excluding the compositor -- that
+# answers "is something OTHER than Hyprland doing GPU work", which is the
+# actual question. Not built; utilization was tried three ways first.
+#
+# Plus a minimum dwell at `high` so the loop cannot oscillate
+# even if the index misbehaves on some workload we have not seen.
+#
+# Neither `high` nor `low` pins the clock: both are CEILINGS and the GPU still
+# gates off and floats (mean sclk was 376MHz while at `high`). That is why 4K
+# scanout is fine at `low`, and why sclk must be read live, not assumed.
+WINDOW=${WINDOW:-30}           # samples in the moving average
+RAISE_INDEX=${RAISE_INDEX:-85} # mean index that counts as "working"
+DROP_INDEX=${DROP_INDEX:-40}   # mean index that counts as idle (hysteresis gap)
+DROP_AFTER=${DROP_AFTER:-15}   # consecutive idle evaluations before dropping
+MIN_HIGH=${MIN_HIGH:-60}       # seconds to stay at `high` before any drop
+INTERVAL=${INTERVAL:-1}
+
+log() { echo "dpm-governor: $*"; [ -w /dev/kmsg ] && echo "dpm-governor: $*" > /dev/kmsg || true; }
+
+[ -w "$DPM" ] || { log "FATAL $DPM not writable (need root)"; exit 1; }
+[ -r "$BUSY" ] || { log "FATAL $BUSY not readable"; exit 1; }
+[ -n "${SCLK:-}" ] && [ -r "$SCLK" ] || { log "FATAL no hwmon freq1_input (sclk)"; exit 1; }
+
+want=$IDLE_LEVEL
+echo "$want" > "$DPM" 2>/dev/null || true
+log "started. idle=$IDLE_LEVEL busy=$BUSY_LEVEL window=$WINDOW raise>$RAISE_INDEX drop<$DROP_INDEX min_high=${MIN_HIGH}s"
+
+samples=""; n=0; sum=0; lo=0
+while :; do
+	b=$(cat "$BUSY" 2>/dev/null || echo "")
+	if [ -z "$b" ]; then
+		# The SMU stopped answering. Do not thrash it; back off and retry.
+		log "WARN gpu_busy_percent unreadable, backing off 10s"
+		sleep 10
+		continue
+	fi
+
+	# Normalise by the LIVE clock before averaging -- see CONTROL-LOOP NOTE.
+	f=$(cat "$SCLK" 2>/dev/null || echo 0); f=$((f / 1000000))
+	b=$((b * f / 100))
+
+	# Moving average over the last $WINDOW samples, in plain sh.
+	# `samples` holds them space-separated with no leading space.
+	if [ -z "$samples" ]; then samples="$b"; else samples="$samples $b"; fi
+	sum=$((sum + b)); n=$((n + 1))
+	while [ "$n" -gt "$WINDOW" ]; do
+		first=${samples%% *}            # oldest sample
+		samples=${samples#* }           # drop it
+		sum=$((sum - first)); n=$((n - 1))
+	done
+	mean=$((sum / n))
+
+	now=$(cut -d. -f1 /proc/uptime)
+	if [ "$want" = "$IDLE_LEVEL" ] && [ "$n" -ge "$WINDOW" ] && [ "$mean" -ge "$RAISE_INDEX" ]; then
+		want=$BUSY_LEVEL; lo=0; raised_at=$now
+		echo "$want" > "$DPM" 2>/dev/null \
+			&& log "sustained load (index $mean) -> $want" || log "FAILED to write $want"
+	elif [ "$want" = "$BUSY_LEVEL" ] && [ $((now - ${raised_at:-0})) -ge "$MIN_HIGH" ]; then
+		if [ "$mean" -lt "$DROP_INDEX" ]; then lo=$((lo + 1)); else lo=0; fi
+		if [ "$lo" -ge "$DROP_AFTER" ]; then
+			want=$IDLE_LEVEL; lo=0
+			echo "$want" > "$DPM" 2>/dev/null \
+				&& log "idle (index $mean) -> $want" || log "FAILED to write $want"
+		fi
+	fi
+
+	sleep "$INTERVAL"
+done

@@ -1,0 +1,64 @@
+# MacBookPro16,1 hybrid graphics: Arch's aquamarine plus the Intel-primary
+# 4K modeset fix. See ../README.md, problem 3.
+#
+# Without this patch a modeset commit on a secondary DRM backend imports a
+# primary-GPU LINEAR buffer straight into amdgpu, which rejects it:
+#   ERR drm: Failed to submit a buffer with drmModeAddFB2WithModifiers
+# The CRTC has already switched, so the external head keeps scanning the stale
+# smaller buffer -- the desktop occupies a quarter of a 4K screen.
+#
+# Keep pkgname the same so this replaces the stock package (pkgrel 2.1 > 2),
+#   IgnorePkg = aquamarine   in /etc/pacman.conf
+# Otherwise a routine -Syu silently restores stock and 4K breaks at next login.
+#
+# Based on the official PKGBUILD by Caleb Maclennan <caleb@alerque.com>.
+
+pkgname=aquamarine
+pkgver=0.14.0
+pkgrel=2.1
+pkgdesc='a very light linux rendering backend library (MBP16,1 Intel-primary 4K fix)'
+arch=(x86_64 aarch64)
+url="https://github.com/hyprwm/$pkgname"
+license=(BSD-3-Clause)
+depends=(libgcc
+         libstdc++
+         glibc # libc.so libm.so
+         hyprutils libhyprutils.so
+         hyprwayland-scanner
+         libdisplay-info libdisplay-info.so
+         libdrm # libdrm.so
+         libglvnd libEGL.so
+         libinput # libinput.so
+         mesa # libgbm.so
+         opengl-driver
+         pixman
+         seatd libseat.so
+         systemd-libs libudev.so
+         wayland libwayland-client.so
+         wayland-protocols)
+makedepends=(cmake)
+provides=("lib$pkgname.so")
+_archive="$pkgname-$pkgver"
+source=("$url/archive/v$pkgver/$_archive.tar.gz"
+        intel-primary-4k.patch)
+sha256sums=('5dcf0b17f7dd51539fd7e79d68484f04240b3b63cf9f5f21d5b6dea0088168f9'
+            'SKIP')
+
+prepare() {
+	cd "$_archive"
+	patch -Np1 < "$srcdir/intel-primary-4k.patch"
+}
+
+build() {
+	cd "$_archive"
+	cmake -B build \
+		-D CMAKE_INSTALL_PREFIX=/usr \
+		-D CMAKE_BUILD_TYPE=Release
+	cmake --build build
+}
+
+package() {
+	cd "$_archive"
+	DESTDIR="$pkgdir" cmake --install build
+	install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE
+}
