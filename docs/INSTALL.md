@@ -26,10 +26,8 @@ build that package the first time.
 ## Prerequisite: a booting install first
 
 Apply this repo on top of an Arch/Omarchy install that already boots and logs
-in. The reference machine was installed from the stock Omarchy installer, so
-that path works; add the [t2linux](https://wiki.t2linux.org/) `arch-mact2` repo
-afterwards for the T2 hardware support (`linux-t2`, `apple-bcm-firmware`,
-`apple-t2-audio-config`, `t2fanrd`).
+in. The stock Omarchy installer detects a T2 Mac and installs `linux-t2` for
+you; there is nothing extra to add.
 
 Keep the distro kernel (`linux-t2`) installed. `install.sh` puts
 `linux-t2-mbp161-hybrid` first in the menu (`BOOT_ORDER`) and sets Limine's
@@ -45,9 +43,8 @@ kernel patches and system files are distribution-agnostic.
 
 ## 0. Prerequisites
 
-You need a working [t2linux](https://wiki.t2linux.org/) install first — keyboard,
-trackpad, audio, NVMe and Wi-Fi all depend on it. This repo assumes that is
-already done and adds hybrid graphics on top.
+Omarchy on this machine already provides the T2 stack (keyboard, trackpad,
+audio, NVMe, Wi-Fi). This repo adds hybrid graphics on top.
 
 You also need `apple-set-os` (or an equivalent EFI shim) so that the iGPU is
 visible in `lspci -s 00:02.0`. Without it the mux switch has nowhere to go:
