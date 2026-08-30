@@ -1,0 +1,7 @@
+#!/bin/sh
+# Limine auto-boots default_entry, not BOOT_ORDER. Pin it after limine-update,
+# before 90-limine-enroll-config.
+conf=/boot/limine.conf
+[ -f "$conf" ] || exit 0
+grep -q '//linux-t2-mbp161-hybrid' "$conf" || exit 0
+sed -i 's|^default_entry:.*|default_entry: Omarchy/linux-t2-mbp161-hybrid|' "$conf"

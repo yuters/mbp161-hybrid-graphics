@@ -3,6 +3,43 @@
 Read [the warnings](../README.md#do-not-do-these) first. One of them will hang
 your machine if you ignore it.
 
+## The short path
+
+If you already have a kernel package built from `kernel/patches/*.patch` — from
+a previous install of yours, or built once and kept — you do not need to rebuild
+anything:
+
+```sh
+./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
+```
+
+That installs the kernel, builds and pins the patched aquamarine, installs the
+scripts, units and lid policy, writes the kernel command line, appends the
+session GPU selection, and enables the services. It is idempotent; re-running is
+safe. `./install.sh --skip-kernel` does everything except the kernel.
+
+**A kernel package survives a full OS reinstall.** It is a normal
+`.pkg.tar.zst`. Keeping one on a separate partition turns a 100-minute rebuild
+into a 30-second `pacman -U`. The rest of this document is the long path: how to
+build that package the first time.
+
+## Prerequisite: a booting install first
+
+Apply this repo on top of an Arch/Omarchy install that already boots and logs
+in. The reference machine was installed from the stock Omarchy installer, so
+that path works; add the [t2linux](https://wiki.t2linux.org/) `arch-mact2` repo
+afterwards for the T2 hardware support (`linux-t2`, `apple-bcm-firmware`,
+`apple-t2-audio-config`, `t2fanrd`).
+
+Keep the distro kernel (`linux-t2`) installed. `install.sh` puts
+`linux-t2-mbp161-hybrid` first in the menu (`BOOT_ORDER`) and sets Limine's
+`default_entry` to `Omarchy/linux-t2-mbp161-hybrid`. Those are different
+knobs: `BOOT_ORDER` is limine-entry-tool's menu sort; Limine auto-boots
+`default_entry` (a path or a 1-based index, see CONFIG.md). Using only
+`BOOT_ORDER` does not change auto-boot if `default_entry` already names a
+specific kernel — which a previous config on this machine did
+(`Omarchy/linux-t2`).
+
 Every path below assumes Arch. Adapt package steps for other distributions; the
 kernel patches and system files are distribution-agnostic.
 
@@ -38,17 +75,18 @@ Build and install however you normally do. On Arch, `make pacman-pkg` works, but
 **set `PACMAN_PKGBASE` explicitly**:
 
 ```sh
-PACMAN_PKGBASE=linux-mbp161 make pacman-pkg
+PACMAN_PKGBASE=linux-t2-mbp161-hybrid make pacman-pkg
 ```
 
 Without it the package is named `linux-upstream` and installs *alongside* your
-real kernel rather than replacing it.
+real kernel rather than replacing it. `PACMAN_PKGBASE` is also the Limine
+entry name.
 
 After installing, verify the package owns every file it should — this catches
 modules you hot-replaced during testing and forgot about:
 
 ```sh
-sudo pacman -Qkk linux-mbp161      # expect zero altered files
+sudo pacman -Qkk linux-t2-mbp161-hybrid      # expect zero altered files
 ```
 
 ## 2. Kernel command line
@@ -111,10 +149,17 @@ sudo install -m644 system/systemd/mbp161-amdgpu-dpm-governor.service    /etc/sys
 sudo install -Dm644 system/systemd/30-mbp161-lid-safety.conf \
      /etc/systemd/logind.conf.d/30-mbp161-lid-safety.conf
 
+sudo install -m755 system/boot-hooks/80-mbp161-default-entry \
+     /etc/boot/hooks/post.d/80-mbp161-default-entry
+
 sudo systemctl daemon-reload
 sudo systemctl enable mbp161-hybrid-prep.service
 sudo systemctl enable mbp161-amdgpu-dpm-governor.service
+sudo limine-update
 ```
+
+The Limine post-hook rewrites `default_entry` to the patched kernel after
+`limine-update`.
 
 `mbp161-hybrid-prep` must run **before** the display manager. It sets a static
 DPM level and turns off the phantom AMD eDP connector. If it has not run, the

@@ -81,6 +81,18 @@ here.
 
 ## Install
 
+**If you already have a kernel package built from these patches**, there is
+nothing to rebuild:
+
+```sh
+./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
+```
+
+That does the kernel, aquamarine, scripts, units, lid policy, command line,
+session GPU selection and services, and is safe to re-run. A `.pkg.tar.zst`
+survives a full OS reinstall, so keeping one turns a 100-minute rebuild into a
+30-second install.
+
 See [docs/INSTALL.md](docs/INSTALL.md) for the full procedure. In short:
 
 1. Build a kernel from Linux 7.2 + the t2linux v7.2-rc6 stack, then apply
@@ -90,7 +102,8 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full procedure. In short:
    the one parameter that needs a decision.
 3. Build the patched aquamarine (`aquamarine/`) and pin it so a routine
    `pacman -Syu` cannot silently revert you.
-4. Install `system/bin/*`, `system/systemd/*`, and the `uwsm` env snippet.
+4. Install `system/bin/*`, `system/systemd/*`, the Limine `default_entry`
+   hook, and the `uwsm` env snippet.
 
 ## What is and isn't verified
 
