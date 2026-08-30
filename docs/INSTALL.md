@@ -73,9 +73,12 @@ With only the four patches in this repo, amdgpu has no gmux runtime-PM support,
 so the discrete GPU simply stays bound and awake — which is what this
 configuration wants, since it is driving the external display and since runtime
 suspending it is close to what breaks suspend in the first place.
-`amdgpu.runpm=0` states that intent explicitly and is the conservative choice.
-**Neither value has been tested on a tree built from only these four patches**,
-so if you see the dGPU attempting to runtime-suspend, `runpm=0` is the knob.
+`amdgpu.runpm=0` states that intent explicitly, and it is **now the tested
+value**: a build from only these four patches was booted with
+`apple_gmux.force_igd=1 amdgpu.runpm=0` and behaved correctly —
+`/sys/bus/pci/devices/0000:03:00.0/power/control` reads `on`,
+`runtime_suspended_time` stays `0`, the GPU never attempts a runtime suspend,
+and both displays plus s2idle work. Use `runpm=0`.
 
 Regenerate your initramfs / UKI afterwards.
 

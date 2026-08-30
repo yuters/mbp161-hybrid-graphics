@@ -20,17 +20,36 @@ v7.2-rc6 tree, and every file they touch compiles from that tree —
 `apple-gmux.o`, `pci-driver.o`, `amdgpu_drv.o`, and the whole
 `drivers/gpu/drm/amd/display/amdgpu_dm/` directory.
 
-**Note on 0002.** The version of this change that ran on the reference machine
-also tested `adev->pm.rpm_mode == AMDGPU_RUNPM_GMUX`. That enum comes from a
-larger research tree, not upstream, so the condition was removed here — it was
-redundant anyway, since `apple_gmux_panel_is_igd()` is already false unless
-apple-gmux is bound with the mux on the iGPU. The shipped patch is therefore
-*not* byte-identical to what was runtime-tested, though it is behaviourally
-equivalent on this hardware.
+**A kernel built from exactly these four patches has been booted and used.**
+2026-08-29: a fresh tree at the t2linux v7.2-rc6 base with only these four
+patches applied, built with zero errors, packaged, installed alongside the
+research kernel and booted. Verified on that build:
 
-**Not verified:** a full kernel build and boot from exactly these four patches
-and nothing else. The reference machine ran them inside a larger tree that also
-carried D3cold and Config3 experiments, deliberately excluded here as dead ends.
+- **0001** — booted with `apple_gmux.force_igd=1` and **no**
+  `modprobe.blacklist=amdgpu`. Both GPUs bound (`00:02.0` i915, `03:00.0`
+  amdgpu), internal panel lit, `apple_gmux: Switching to IGD` logged. This is
+  the direct test: without the patch, that same configuration races i915 against
+  amdgpu and lands on a grey screen with a plymouth/PID-1 crash.
+- **0002** — `Skipping in-kernel fbdev: gmux panel on IGD, compositor owns KMS`.
+- **0003** — `Skipping eDP detect: gmux panel is owned by IGD`; `card1-eDP-2`
+  stays `disconnected`.
+- **0004** — six bypass markers in a device-callback gate, then a real 36.75 s
+  s2idle **with the external display attached**: every captured field identical
+  across the sleep, no amdgpu/SMU/xHCI/i915 error, no `WARNING:`/`BUG:`/`Call
+  Trace`, both displays live at full resolution on resume.
+- The compositor came up Intel-primary with AMD secondary at an ordinary login,
+  drove `DP-5` at 3840x2160@60, and logged **zero** `drmModeAddFB2WithModifiers`
+  or buffer-submit failures — so the aquamarine patch is exercised on this build
+  too.
+- No research code reached the binaries; the kernel log contains none of the
+  research tree's markers.
+
+**Note on 0002.** The version that first ran on the reference machine also
+tested `adev->pm.rpm_mode == AMDGPU_RUNPM_GMUX`. That enum belongs to the
+research tree, not upstream, so the condition was dropped here — redundant
+anyway, since `apple_gmux_panel_is_igd()` is false unless apple-gmux is bound
+with the mux on the iGPU. **The version in this repo is now the version that has
+been booted and tested**, which was not true when this file was first written.
 
 ## Not included, on purpose
 

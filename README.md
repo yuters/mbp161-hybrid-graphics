@@ -112,6 +112,13 @@ the panel, so you get a black display and no error at all. Score boots by the
 panel lighting up and by the presence of `apple_gmux: Switching to IGD`, never
 by an absent error.
 
+**Also verified, on a kernel built from exactly the four patches in this repo
+and nothing else** (2026-08-29): it boots, both GPUs bind, the panel lights
+without needing `modprobe.blacklist=amdgpu`, 4K runs on USB-C with zero
+buffer-submit failures, and a real 36.75 s s2idle with the external display
+attached preserves every captured device state. See
+[kernel/README.md](kernel/README.md#verification-status).
+
 **Not verified:** anything on a second machine, any other Apple model, any other
 kernel base, and deep S3 (`mem_sleep_default=deep`), which remains broken —
 amdgpu's mode-1 reset and Titan Ridge power removal are both unfixed.
