@@ -1,9 +1,10 @@
-# MacBookPro16,1 hybrid graphics on Linux
+# MacBookPro16,1 hybrid graphics on Omarchy
 
 Dual-GPU display, power management and suspend for the 16-inch 2019 MacBook Pro
-(`MacBookPro16,1`) running Linux: **internal panel on the Intel iGPU, USB-C on
-the AMD dGPU, one Wayland session across both, and a discrete GPU that idles
-instead of burning 25 W.**
+(`MacBookPro16,1`) on [Omarchy](https://omarchy.org/): **internal panel on the
+Intel iGPU, USB-C on the AMD dGPU, one Wayland session across both, and a
+discrete GPU that idles instead of burning 25 W.** This is an Omarchy repo,
+not a generic Linux one.
 
 This is what the machine does with these patches applied:
 
@@ -22,10 +23,10 @@ This is what the machine does with these patches applied:
 - `MacBookPro16,1` — Intel UHD 630 (`8086:9bc4` at `00:02.0`), AMD Navi 14
   (`1002:7340` at `03:00.0`), Apple gmux, two Intel JHL7540 Titan Ridge USB-C
   controllers, Apple T2.
-- Arch Linux, Hyprland via uwsm, aquamarine 0.14.0.
-- Linux 7.2 with the [t2linux](https://wiki.t2linux.org/) v7.2-rc6 patch stack.
-  **The T2 stack is a prerequisite, not part of this repo** — you need it for
-  the keyboard, trackpad, audio and NVMe regardless.
+- [Omarchy](https://omarchy.org/) (Hyprland via uwsm, aquamarine 0.14.0, Limine).
+  The stock installer detects a T2 Mac and installs `linux-t2` itself.
+- Kernel patches sit on Linux 7.2 with the [t2linux](https://wiki.t2linux.org/)
+  v7.2-rc6 stack, which Omarchy already ships.
 - Tested on one machine. See [What is and isn't verified](#what-is-and-isnt-verified).
 
 ## The four problems, and what fixes each

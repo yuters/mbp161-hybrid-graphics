@@ -25,9 +25,9 @@ build that package the first time.
 
 ## Prerequisite: a booting install first
 
-Apply this repo on top of an Arch/Omarchy install that already boots and logs
-in. The stock Omarchy installer detects a T2 Mac and installs `linux-t2` for
-you; there is nothing extra to add.
+This is for [Omarchy](https://omarchy.org/) on a `MacBookPro16,1`. Apply it on
+top of an install that already boots and logs in. The stock Omarchy installer
+detects a T2 Mac and installs `linux-t2` for you; there is nothing extra to add.
 
 Keep the distro kernel (`linux-t2`) installed. `install.sh` puts
 `linux-t2-mbp161-hybrid` first in the menu (`BOOT_ORDER`) and sets Limine's
@@ -37,9 +37,6 @@ knobs: `BOOT_ORDER` is limine-entry-tool's menu sort; Limine auto-boots
 `BOOT_ORDER` does not change auto-boot if `default_entry` already names a
 specific kernel — which a previous config on this machine did
 (`Omarchy/linux-t2`).
-
-Every path below assumes Arch. Adapt package steps for other distributions; the
-kernel patches and system files are distribution-agnostic.
 
 ## 0. Prerequisites
 
@@ -68,8 +65,8 @@ done
 Confirm `CONFIG_APPLE_GMUX=y` (or `=m`) — patches 2 and 3 call
 `apple_gmux_panel_is_igd()` and fall back to a stub without it.
 
-Build and install however you normally do. On Arch, `make pacman-pkg` works, but
-**set `PACMAN_PKGBASE` explicitly**:
+Build and install with `make pacman-pkg`, but **set `PACMAN_PKGBASE`
+explicitly**:
 
 ```sh
 PACMAN_PKGBASE=linux-t2-mbp161-hybrid make pacman-pkg

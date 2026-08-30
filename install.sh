@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply the MacBookPro16,1 hybrid-graphics setup to a working Omarchy/Arch
+# Apply the MacBookPro16,1 hybrid-graphics setup to a working Omarchy
 # install. Idempotent: safe to re-run.
 #
 #   ./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
@@ -29,7 +29,8 @@ die()  { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 say "preflight"
 [[ "$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)" == MacBookPro16,1 ]] ||
 	die "this is not a MacBookPro16,1. These patches are DMI- and PCI-ID-gated and will do nothing elsewhere."
-command -v pacman >/dev/null || die "pacman not found; this installer is Arch-specific."
+[[ "$(. /etc/os-release 2>/dev/null; echo "${ID:-}")" == omarchy ]] ||
+	die "this is for Omarchy (os-release ID=omarchy)."
 [[ $EUID -ne 0 ]] || die "run as your normal user, not root. It uses sudo where needed."
 info "MacBookPro16,1 confirmed"
 
