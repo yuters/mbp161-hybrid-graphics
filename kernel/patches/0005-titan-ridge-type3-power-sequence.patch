@@ -1,0 +1,469 @@
+From: MacBookPro16,1 hybrid graphics
+Subject: [PATCH 5/5] PCI/thunderbolt/xhci: drive the MacBookPro16,1 Titan Ridge power sequence
+
+On MacBookPro16,1 the JHL7540 Titan Ridge power sequence lives in ACPI, but
+every firmware entry point is gated on !OSDW(): PEGn._INI only arms it when the
+OS is not Darwin, and _WAK only calls ICMB() when that arming happened. Linux
+answers _OSI("Darwin") on Apple hardware, so none of it runs. Across s2idle the
+switch never comes back out of D3 -- eight devices in the two subtrees report
+"Unable to change power state from D3hot to D0, device inaccessible", both xHCI
+controllers report "Controller not ready at resume -19" and then "HC died", and
+neither USB-C port works again until reboot.
+
+macOS does not use _WAK for this either. AppleThunderboltNHIType3 drives the
+same ACPI methods from the driver, which is why Apple gates them out for Darwin.
+This implements that sequence, in its order:
+
+  down   xHCI RTPC(0)                      xhci_pci_suspend()
+         NHI Go2Sx over the VSEC mailbox, NHI RTPC(0)
+                                           apple_tr_nhi_suspend_noirq()
+         NHI0.SXFP(0), NHI0.XRST(1)        root-port suspend_late fixup
+  up     NHI0.XRST(0), NHI0.TRPE(1, 0)     root-port resume_early fixup
+         NHI RTPC(1)                       apple_tr_nhi_resume_noirq()
+         xHCI RTPC(1)                      xhci_pci_resume()
+
+Three things about it are not obvious and were each established by measurement:
+
+Both RTPC votes are required. NHI RTPC writes PEGn.RTBT and xHCI RTPC writes
+PEGn.RUSB; the upstream switch's POFF() is !RTBT && !RUSB, and RUSB defaults to
+One. Without the xHCI half POFF() never becomes true and firmware keeps power.
+
+SXFP(0) and XRST(1) must run from the root port's suspend_late fixup, not from
+the NHI's suspend_noirq. SXFP(0) drives GPIO 0x03050007 low, which removes the
+whole subtree from the bus; the PCI core still has to walk the NHI and the three
+bridges above it into D3hot afterwards, and issuing it any earlier makes every
+one of them fail. DECLARE_PCI_FIXUP_SUSPEND_LATE on the root port runs at the
+Fixup: label of pci_pm_suspend_noirq(), after this port's own D-state change and
+after every device below it has suspended, which is the only safe moment.
+
+The Go2Sx mailbox is answered by a firmware connection manager. Linux runs the
+software CM on Apple hardware (icm.c refuses x86_apple_machine), and
+tb_switch_suspend() has already set TB_LC_SX_CTRL_SLP on every link controller
+over the control channel -- the same notification by another route, which is why
+icl_nhi_suspend_noirq() skips this mailbox when !tb_switch_is_icm(). The command
+is still sent because Apple sends it, but its timeout is expected and is logged
+rather than treated as an error.
+
+Also skip the host-router reset in tb_resume_noirq() when the platform firmware
+did not participate in the sleep. It exists to undo topology the firmware may
+have set up behind the driver's back, which cannot have happened during s2idle.
+
+Verified on the reference machine: six pm_test=platform cycles and one real
+123.7 s s2idle, all with zero Titan Ridge PM failures, TRPE(1,0) acquiring
+PEGn.UPSB.AVND on the first attempt every time in 72 ms, and both controllers
+subsequently reaching D3cold on their own when idle -- which the previous
+pin-in-D0 bypass could never allow.
+
+diff --git i/drivers/pci/quirks.c w/drivers/pci/quirks.c
+index b09f27f7846f..796ea8e76cc3 100644
+--- i/drivers/pci/quirks.c
++++ w/drivers/pci/quirks.c
+@@ -35,6 +35,7 @@
+ #include <linux/sizes.h>
+ #include <linux/suspend.h>
+ #include <linux/switchtec.h>
++#include <linux/mbp161-tb.h>
+ #include "pci.h"
+ 
+ static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
+@@ -3927,6 +3928,131 @@ static void quirk_apple_poweroff_thunderbolt(struct pci_dev *dev)
+ DECLARE_PCI_FIXUP_SUSPEND_LATE(PCI_VENDOR_ID_INTEL,
+ 			       PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C,
+ 			       quirk_apple_poweroff_thunderbolt);
++
++/*
++ * Apple: drive the Titan Ridge power sequence the way macOS does.
++ *
++ * On MacBookPro16,1 the JHL7540 power sequence lives in ACPI, but every
++ * firmware entry point is gated on !OSDW(): PEGn._INI only arms it when the OS
++ * is not Darwin, and _WAK only calls ICMB() when that arming happened.  Linux
++ * answers _OSI("Darwin") on Apple hardware, so none of it runs and the switch
++ * never comes back out of D3 -- the bridges report "Unable to change power
++ * state from D3hot to D0, device inaccessible" and the internal xHCI answers
++ * configuration cycles but not memory cycles.  macOS drives the same methods
++ * from its own driver rather than from _WAK, which is exactly why Apple gates
++ * them out for Darwin.  This is the Linux equivalent of that driver-side work.
++ *
++ * The sequence is AppleThunderboltNHIType3's, in its order:
++ *
++ *   down   xHCI RTPC(0)                    xhci_pci_suspend()
++ *          NHI Go2Sx over the VSEC mailbox, NHI RTPC(0)
++ *                                          apple_tr_nhi_suspend_noirq()
++ *          NHI0.SXFP(0), NHI0.XRST(1)      here, at suspend_late
++ *   up     NHI0.XRST(0), NHI0.TRPE(1, 0)   here, at resume_early
++ *          NHI RTPC(1)                     apple_tr_nhi_resume_noirq()
++ *          xHCI RTPC(1)                    xhci_pci_resume()
++ *
++ * The two RTPC votes are both load-bearing: NHI RTPC writes PEGn.RTBT, xHCI
++ * RTPC writes PEGn.RUSB, and the upstream switch's POFF() is
++ * !RTBT && !RUSB.  RUSB defaults to One, so without the xHCI half POFF()
++ * never becomes true and the firmware refuses to release power.
++ *
++ * SXFP(0) drives GPIO 0x03050007 low, which removes the controller from the
++ * bus, and TRPE(1) releases it and waits for PEGn.UPSB.AVND to answer, power
++ * cycling up to five times.  Because SXFP(0) takes the whole subtree away, it
++ * can only run once everything below the root port has already suspended --
++ * see the placement note on quirk_mbp161_type3_suspend().
++ *
++ * mbp161_tb_type3 is on by default and gated on DMI so it is inert elsewhere.
++ * To fall back to the old behaviour -- both controllers pinned in D0 across
++ * s2idle, which works but blocks any Thunderbolt power management -- boot with
++ *   mbp161_tb_type3=0 mbp161_tb_bypass=1
++ */
++static int mbp161_tb_type3 = 1;
++core_param(mbp161_tb_type3, mbp161_tb_type3, int, 0644);
++
++bool mbp161_tb_type3_wanted(void)
++{
++	return mbp161_tb_type3 && dmi_match(DMI_PRODUCT_NAME, "MacBookPro16,1");
++}
++EXPORT_SYMBOL_GPL(mbp161_tb_type3_wanted);
++
++/*
++ * Type3 power-down on the PEG root port.  DECLARE_PCI_FIXUP_SUSPEND_LATE runs
++ * at the Fixup: label of pci_pm_suspend_noirq(), which is the last statement
++ * of that function -- after this port's own D-state transition, and after every
++ * device below it has already suspended (children suspend before parents).
++ * That is the only safe moment to cut the rail.  Doing it from the NHI's
++ * suspend_noirq instead strands the NHI and the three bridges above it, which
++ * then all report "Unable to change power state from D0 to D3hot".
++ *
++ * SXFP(0) drives GPIO 0x03050007 low, which is the pin TRPE(1) releases on the
++ * way back, and leaves it in the driven-low state TRPE(1)'s guard requires.
++ * XRST(1) then arms XRTE and parks the link in L2 with the port in D3hot.
++ */
++static void quirk_mbp161_type3_suspend(struct pci_dev *dev)
++{
++	acpi_handle port, nhi;
++
++	if (!mbp161_tb_type3_wanted())
++		return;
++	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
++		return;
++
++	port = ACPI_HANDLE(&dev->dev);
++	if (!port)
++		return;
++	if (ACPI_FAILURE(acpi_get_handle(port, "UPSB.DSB0.NHI0", &nhi)))
++		return;
++
++	pci_info(dev, "mbp161 type3: NHI0.SXFP(0) + NHI0.XRST(1)\n");
++	acpi_execute_simple_method(nhi, "SXFP", 0);
++	acpi_execute_simple_method(nhi, "XRST", 1);
++}
++DECLARE_PCI_FIXUP_SUSPEND_LATE(PCI_VENDOR_ID_INTEL, 0x1905,
++			       quirk_mbp161_type3_suspend);
++DECLARE_PCI_FIXUP_SUSPEND_LATE(PCI_VENDOR_ID_INTEL, 0x1909,
++			       quirk_mbp161_type3_suspend);
++
++/*
++ * Type3 pre-PCI wake on the PEG root port.  PEG1/PEG2 have no _PS0 or _PS3 --
++ * only _PRT and _PRW -- so pci_pm_default_resume_early() touches nothing but
++ * the root port's own always-accessible config space, and PCEU() (which is
++ * what calls XRST(0) when XRTE is armed) belongs to the PEG scope and runs
++ * from DSB0._PS0, long after this.  That makes this hook the first thing to
++ * reach the Titan Ridge on the way back, and both calls below necessary:
++ * XRST(0) undoes the L2/D3hot park, TRPE(1,0) raises the rail SXFP(0) cut.
++ * Do not poll NHI PCI vendor ID from Linux: a config read of a still-dead
++ * Titan Ridge hard-freezes this machine.  TRPE(1) already waits for it.
++ */
++static void quirk_mbp161_type3_resume(struct pci_dev *dev)
++{
++	union acpi_object args[2] = {
++		{ .integer = { ACPI_TYPE_INTEGER, 1 } },
++		{ .integer = { ACPI_TYPE_INTEGER, 0 } },
++	};
++	struct acpi_object_list list = { .count = 2, .pointer = args };
++	acpi_handle port, nhi;
++
++	if (!mbp161_tb_type3_wanted())
++		return;
++	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
++		return;
++
++	port = ACPI_HANDLE(&dev->dev);
++	if (!port)
++		return;
++	if (ACPI_FAILURE(acpi_get_handle(port, "UPSB.DSB0.NHI0", &nhi)))
++		return;
++
++	pci_info(dev, "mbp161 type3: NHI0.XRST(0) + NHI0.TRPE(1,0)\n");
++	acpi_execute_simple_method(nhi, "XRST", 0);
++	acpi_evaluate_object(nhi, "TRPE", &list, NULL);
++}
++DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL, 0x1905,
++			       quirk_mbp161_type3_resume);
++DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL, 0x1909,
++			       quirk_mbp161_type3_resume);
+ #endif
+ 
+ /*
+diff --git i/drivers/thunderbolt/pci.c w/drivers/thunderbolt/pci.c
+index bbd186c29ef7..7f230054da92 100644
+--- i/drivers/thunderbolt/pci.c
++++ w/drivers/thunderbolt/pci.c
+@@ -18,6 +18,8 @@
+ #include <linux/property.h>
+ #include <linux/string_helpers.h>
+ #include <linux/suspend.h>
++#include <linux/acpi.h>
++#include <linux/mbp161-tb.h>
+ 
+ #include "nhi.h"
+ #include "nhi_regs.h"
+@@ -261,6 +263,108 @@ static const struct tb_nhi_ops pci_nhi_default_ops = {
+ 	.init_interrupts = nhi_pci_init_msi,
+ };
+ 
++/*
++ * Apple Type3 (Titan Ridge) s2idle sequence.  VSEC+0x4c / +0x48 are PCI
++ * extended config (IOPCIDevice::extendedConfigWrite32/Read32).  Command 5 is
++ * (GO2SX=2 << 1) | VALID, the same encoding as icl_nhi_lc_mailbox_cmd.
++ * AppleThunderboltNHIType3::waitForOk2Go2Sx polls 30000 times with IODelay(10).
++ */
++#define APPLE_TR_TBT2PCIE	0x48
++#define APPLE_TR_PCIE2TBT	0x4c
++#define APPLE_TR_GO2SX_CMD	5
++#define APPLE_TR_GO2SX_DONE	4
++#define APPLE_TR_GO2SX_TRIES	0x7530
++
++static void apple_tr_nhi_acpi(struct tb_nhi *nhi, char *method, u64 arg)
++{
++#if IS_ENABLED(CONFIG_ACPI)
++	acpi_handle handle = ACPI_HANDLE(nhi->dev);
++
++	if (!handle)
++		return;
++	acpi_execute_simple_method(handle, method, arg);
++#endif
++}
++
++static int apple_tr_wait_go2sx(struct pci_dev *pdev, int vsec)
++{
++	u32 val = 0;
++	int i;
++
++	for (i = 0; i < APPLE_TR_GO2SX_TRIES; i++) {
++		pci_read_config_dword(pdev, vsec + APPLE_TR_TBT2PCIE, &val);
++		if (val == 0xffffffff)
++			return -ENODEV;
++		if ((val & BIT(0)) && ((val & 0xfe) == APPLE_TR_GO2SX_DONE)) {
++			pci_write_config_dword(pdev, vsec + APPLE_TR_PCIE2TBT, 0);
++			return 0;
++		}
++		udelay(10);
++	}
++	return -ETIMEDOUT;
++}
++
++static int apple_tr_nhi_suspend_noirq(struct tb_nhi *nhi, bool wakeup)
++{
++	struct pci_dev *pdev = to_pci_dev(nhi->dev);
++	int vsec;
++	int ret;
++
++	if (!mbp161_tb_type3_wanted())
++		return 0;
++
++	/*
++	 * Only the parts that need live config space belong here.  Cutting the
++	 * rail from this hook strands the NHI and every bridge above it: the
++	 * PCI core still has to walk them into D3hot afterwards, and they all
++	 * come back "Unable to change power state from D0 to D3hot".  SXFP(0)
++	 * and XRST(1) moved to quirk_mbp161_type3_suspend() on the root port.
++	 *
++	 * The Go2Sx mailbox is answered by the firmware connection manager.
++	 * Linux runs the software CM on Apple hardware (icm.c refuses
++	 * x86_apple_machine), and tb_switch_suspend() has already set
++	 * TB_LC_SX_CTRL_SLP on every link controller over the control channel,
++	 * which is the same notification by another route -- mainline skips
++	 * this mailbox for exactly that reason (see icl_nhi_suspend_noirq).
++	 * Send it anyway because Apple does, but a timeout here is expected
++	 * and is not a failure.
++	 */
++	vsec = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_VNDR);
++	if (!vsec) {
++		dev_err(nhi->dev, "mbp161 type3: no PCIe VSEC\n");
++	} else {
++		pci_write_config_dword(pdev, vsec + APPLE_TR_PCIE2TBT,
++				       APPLE_TR_GO2SX_CMD);
++		ret = apple_tr_wait_go2sx(pdev, vsec);
++		pci_info(pdev, "mbp161 type3: Go2Sx VSEC %#x ack %d%s\n",
++			 vsec, ret, ret ? " (expected under the software CM)" : "");
++	}
++
++	apple_tr_nhi_acpi(nhi, "RTPC", 0);
++	return 0;
++}
++
++static int apple_tr_nhi_resume_noirq(struct tb_nhi *nhi)
++{
++	if (!mbp161_tb_type3_wanted())
++		return 0;
++
++	apple_tr_nhi_acpi(nhi, "RTPC", 1);
++	return 0;
++}
++
++static const struct tb_nhi_ops apple_tr_nhi_ops = {
++	.pre_nvm_auth = nhi_pci_start_dma_port,
++	.post_nvm_auth = nhi_pci_complete_dma_port,
++	.request_ring_irq = nhi_pci_ring_request_msix,
++	.release_ring_irq = nhi_pci_ring_release_msix,
++	.shutdown = nhi_pci_shutdown,
++	.is_present = nhi_pci_is_present,
++	.init_interrupts = nhi_pci_init_msi,
++	.suspend_noirq = apple_tr_nhi_suspend_noirq,
++	.resume_noirq = apple_tr_nhi_resume_noirq,
++};
++
+ /* Ice Lake specific NHI operations */
+ 
+ #define ICL_LC_MAILBOX_TIMEOUT	500 /* ms */
+@@ -532,8 +636,10 @@ static struct pci_device_id nhi_ids[] = {
+ 	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_2C_NHI) },
+ 	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_4C_NHI) },
+ 	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_ALPINE_RIDGE_C_USBONLY_NHI) },
+-	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_NHI) },
+-	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI) },
++	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_NHI),
++	  .driver_data = (kernel_ulong_t)&apple_tr_nhi_ops },
++	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI),
++	  .driver_data = (kernel_ulong_t)&apple_tr_nhi_ops },
+ 	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_ICL_NHI0),
+ 	  .driver_data = (kernel_ulong_t)&icl_nhi_ops },
+ 	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_ICL_NHI1),
+diff --git i/drivers/thunderbolt/tb.c w/drivers/thunderbolt/tb.c
+index f43f2d952372..81d05e47aa06 100644
+--- i/drivers/thunderbolt/tb.c
++++ w/drivers/thunderbolt/tb.c
+@@ -10,6 +10,7 @@
+ #include <linux/errno.h>
+ #include <linux/delay.h>
+ #include <linux/pm_runtime.h>
++#include <linux/suspend.h>
+ #include <linux/platform_data/x86/apple.h>
+ 
+ #include "tb.h"
+@@ -3148,13 +3149,19 @@ static int tb_resume_noirq(struct tb *tb)
+ 	tb_dbg(tb, "resuming...\n");
+ 
+ 	/*
+-	 * For non-USB4 hosts (Apple systems) remove any PCIe devices
+-	 * the firmware might have setup.
++	 * For non-USB4 hosts (Apple systems) remove any PCIe devices the
++	 * firmware might have setup. During suspend-to-idle the platform
++	 * firmware does not run and cannot have changed the topology.
+ 	 */
+-	if (!tb_switch_is_usb4(tb->root_switch))
+-		tb_switch_reset(tb->root_switch);
++	if (!tb_switch_is_usb4(tb->root_switch)) {
++		if (pm_suspend_no_platform())
++			tb_dbg(tb, "skipping host-router reset; platform firmware did not participate\n");
++		else
++			tb_switch_reset(tb->root_switch);
++	}
+ 
+ 	tb_switch_resume(tb->root_switch, false);
++
+ 	tb_free_invalid_tunnels(tb);
+ 	tb_free_unplugged_children(tb->root_switch);
+ 	tb_free_unplugged_xdomains(tb->root_switch);
+@@ -3323,6 +3330,8 @@ static bool tb_apple_add_links(struct tb_nhi *nhi)
+ 	case PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C:
+ 	case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_2C_NHI:
+ 	case PCI_DEVICE_ID_INTEL_FALCON_RIDGE_4C_NHI:
++	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_2C_NHI:
++	case PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_NHI:
+ 		break;
+ 	default:
+ 		return false;
+diff --git i/drivers/usb/host/xhci-pci.c w/drivers/usb/host/xhci-pci.c
+index 6b3fcba44b08..87a5a7e4ff12 100644
+--- i/drivers/usb/host/xhci-pci.c
++++ w/drivers/usb/host/xhci-pci.c
+@@ -14,6 +14,7 @@
+ #include <linux/acpi.h>
+ #include <linux/reset.h>
+ #include <linux/suspend.h>
++#include <linux/mbp161-tb.h>
+ 
+ #include "xhci.h"
+ #include "xhci-trace.h"
+@@ -809,6 +810,24 @@ static void xhci_sparse_control_quirk(struct usb_hcd *hcd)
+ 	writel(reg, hcd->regs + SPARSE_CNTL_ENABLE);
+ }
+ 
++static void xhci_pci_apple_rtpc(struct pci_dev *pdev, u64 enable)
++{
++	acpi_handle handle;
++
++	if (!mbp161_tb_type3_wanted())
++		return;
++	if (pdev->vendor != PCI_VENDOR_ID_INTEL ||
++	    pdev->device != PCI_DEVICE_ID_INTEL_TITAN_RIDGE_4C_XHCI)
++		return;
++
++	handle = ACPI_HANDLE(&pdev->dev);
++	if (!handle)
++		return;
++
++	pci_info(pdev, "mbp161 type3: xHCI RTPC(%llu)\n", enable);
++	acpi_execute_simple_method(handle, "RTPC", enable);
++}
++
+ static int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
+ {
+ 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
+@@ -846,6 +865,9 @@ static int xhci_pci_suspend(struct usb_hcd *hcd, bool do_wakeup)
+ 	if (ret && (xhci->quirks & XHCI_SSIC_PORT_UNUSED))
+ 		xhci_ssic_port_unused_quirk(hcd, false);
+ 
++	if (!ret)
++		xhci_pci_apple_rtpc(pdev, 0);
++
+ 	return ret;
+ }
+ 
+@@ -855,6 +877,7 @@ static int xhci_pci_resume(struct usb_hcd *hcd, pm_message_t msg)
+ 	struct pci_dev *pdev = to_pci_dev(hcd->self.controller);
+ 	bool power_lost = msg.event == PM_EVENT_RESTORE;
+ 	bool is_auto_resume = msg.event == PM_EVENT_AUTO_RESUME;
++	int ret;
+ 
+ 	reset_control_reset(xhci->reset);
+ 
+@@ -885,7 +908,10 @@ static int xhci_pci_resume(struct usb_hcd *hcd, pm_message_t msg)
+ 	if (xhci->quirks & XHCI_PME_STUCK_QUIRK)
+ 		xhci_pme_quirk(hcd);
+ 
+-	return xhci_resume(xhci, power_lost, is_auto_resume);
++	ret = xhci_resume(xhci, power_lost, is_auto_resume);
++	if (!ret)
++		xhci_pci_apple_rtpc(pdev, 1);
++	return ret;
+ }
+ 
+ static int xhci_pci_poweroff_late(struct usb_hcd *hcd, bool do_wakeup)
+diff --git i/include/linux/mbp161-tb.h w/include/linux/mbp161-tb.h
+new file mode 100644
+index 000000000000..3442050e2135
+--- /dev/null
++++ w/include/linux/mbp161-tb.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_MBP161_TB_H
++#define _LINUX_MBP161_TB_H
++
++#include <linux/types.h>
++
++#if IS_ENABLED(CONFIG_ACPI) && IS_ENABLED(CONFIG_PCI)
++bool mbp161_tb_type3_wanted(void);
++#else
++static inline bool mbp161_tb_type3_wanted(void)
++{
++	return false;
++}
++#endif
++
++#endif

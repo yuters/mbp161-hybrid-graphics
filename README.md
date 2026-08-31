@@ -73,12 +73,22 @@ and drops back when idle. **Neither ever writes `auto`.**
 **Bonus: suspend.** Every system suspend used to end in a reboot — the SMU
 returned `-ETIME`, both Titan Ridge controllers came back `-ENODEV`, and DP Alt
 Mode fell back to a USB Billboard device.
-→ `kernel/patches/0004` leaves six PCI functions and their driver state
-completely alone across s2idle, and marks their bridges `skip_bus_pm`. The
-tradeoff is honest: those devices stay powered, which is why sleep costs ~2.1 W
-rather than the ~0.2 W macOS achieves. **The working resume and the 2 W floor
-are the same design decision.** Deep S3 is still broken and is not addressed
-here.
+→ `kernel/patches/0004` leaves the two AMD functions and their driver state
+completely alone across s2idle, and marks their bridges `skip_bus_pm`.
+→ `kernel/patches/0005` handles the two Titan Ridge USB-C controllers properly
+rather than by avoidance: it performs the power sequence macOS performs, taken
+from `AppleThunderboltNHIType3` and cross-checked against the machine's AML, so
+they genuinely power down and come back. Both reach D3cold when idle.
+
+That split matters. `0004` alone worked, but only by pinning all six functions
+in D0 — which is why sleep cost ~2.1 W against the ~0.2 W macOS achieves. `0005`
+removes the USB-C half of that floor. The AMD half remains: the SMU still cannot
+be restored after a normal sleep, so those two functions stay powered by design.
+Deep S3 is still broken and is not addressed here.
+
+`0005` has not yet been tested with a device or display attached to a USB-C
+port; if it misbehaves, `mbp161_tb_type3=0 mbp161_tb_bypass=1` restores the
+older all-six behaviour exactly.
 
 ## Install
 
@@ -126,16 +136,25 @@ the panel, so you get a black display and no error at all. Score boots by the
 panel lighting up and by the presence of `apple_gmux: Switching to IGD`, never
 by an absent error.
 
-**Also verified, on a kernel built from exactly the four patches in this repo
+**Also verified, on a kernel built from exactly the patches in this repo
 and nothing else** (2026-08-29): it boots, both GPUs bind, the panel lights
 without needing `modprobe.blacklist=amdgpu`, 4K runs on USB-C with zero
 buffer-submit failures, and a real 36.75 s s2idle with the external display
 attached preserves every captured device state. See
 [kernel/README.md](kernel/README.md#verification-status).
 
+**Verified for `0005`, the Titan Ridge power sequence (2026-08-30/31):** six
+`pm_test=platform` cycles and one real 123.7 s s2idle, all with zero Titan Ridge
+PM failures, `TRPE(1,0)` succeeding on the first attempt every time in 72 ms,
+and both controllers reaching D3cold on their own afterwards. All of it with
+**both USB-C ports empty** — suspend with something attached is the obvious next
+test and has not been run. The older pin-in-D0 approach *was* verified attached,
+so treat this as a real gap, not a formality.
+
 **Not verified:** anything on a second machine, any other Apple model, any other
-kernel base, and deep S3 (`mem_sleep_default=deep`), which remains broken —
-amdgpu's mode-1 reset and Titan Ridge power removal are both unfixed.
+kernel base, `0005` with a device or display attached, and deep S3
+(`mem_sleep_default=deep`), which remains broken — amdgpu's mode-1 reset and
+Titan Ridge power removal are both unfixed.
 
 **Known rough edges:** the monitor layout can swap sides after a lid close/open
 cycle, because the compositor re-lays-out from scratch rather than restoring the

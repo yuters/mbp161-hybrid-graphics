@@ -101,12 +101,12 @@ parameter that **does not exist** in a clean build. If you copied that command
 line from a write-up of this work, drop `amdgpu.gmux_runpm`; it will be silently
 ignored at best.
 
-With only the four patches in this repo, amdgpu has no gmux runtime-PM support,
+With only the patches in this repo, amdgpu has no gmux runtime-PM support,
 so the discrete GPU simply stays bound and awake — which is what this
 configuration wants, since it is driving the external display and since runtime
 suspending it is close to what breaks suspend in the first place.
 `amdgpu.runpm=0` states that intent explicitly, and it is **now the tested
-value**: a build from only these four patches was booted with
+value**: a build from only these patches was booted with
 `apple_gmux.force_igd=1 amdgpu.runpm=0` and behaved correctly —
 `/sys/bus/pci/devices/0000:03:00.0/power/control` reads `on`,
 `runtime_suspended_time` stays `0`, the GPU never attempts a runtime suspend,
