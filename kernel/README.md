@@ -90,8 +90,8 @@ research kernel and booted. Verified on that build:
   Trace`, both displays live at full resolution on resume.
 - The compositor came up Intel-primary with AMD secondary at an ordinary login,
   drove `DP-5` at 3840x2160@60, and logged **zero** `drmModeAddFB2WithModifiers`
-  or buffer-submit failures — so the aquamarine patch is exercised on this build
-  too.
+  or buffer-submit failures — so the aquamarine fix is exercised on this build
+  too (a local patch on 0.14.0 at the time; upstream since 0.15.0).
 - No research code reached the binaries; the kernel log contains none of the
   research tree's markers.
 

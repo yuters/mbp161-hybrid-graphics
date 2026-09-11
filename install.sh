@@ -58,20 +58,22 @@ fi
 kernel_pkg_name="$(pacman -Qq 2>/dev/null | grep -m1 -E '^(linux-t2-mbp161-hybrid|linux-mbp161)' || true)"
 
 # ------------------------------------------------------------ aquamarine ---
+# The Intel-primary 4K fix is upstream in aquamarine 0.15.0. Older versions of
+# this script built a patched 0.14.0 and pinned it; 0.15.0 changed the soname
+# and Hyprland is rebuilt against it, so that pin now makes -Syu fail.
 if (( do_aquamarine )); then
-	say "aquamarine (Intel-primary 4K fix)"
-	if pacman -Q aquamarine 2>/dev/null | grep -q '0.14.0-2.1'; then
-		info "already at 0.14.0-2.1"
-	else
-		info "building from aquamarine/PKGBUILD (a few minutes)"
-		( cd "$here/aquamarine" && makepkg -si --noconfirm )
+	say "aquamarine (stock, >= 0.15.0)"
+	if grep -qE '^\s*IgnorePkg\s*=\s*aquamarine\s*$' /etc/pacman.conf; then
+		info "removing the IgnorePkg pin an earlier install added"
+		sudo sed -i -E '/^\s*IgnorePkg\s*=\s*aquamarine\s*$/d' /etc/pacman.conf
+	elif grep -qE '^\s*IgnorePkg\s*=.*\baquamarine\b' /etc/pacman.conf; then
+		info "IgnorePkg lists aquamarine with other packages; remove it by hand"
 	fi
-	if grep -qE '^\s*IgnorePkg.*aquamarine' /etc/pacman.conf; then
-		info "already pinned via IgnorePkg"
+	aq_ver="$(pacman -Q aquamarine 2>/dev/null | awk '{print $2}' || true)"
+	if [[ -n "$aq_ver" ]] && (( $(vercmp "$aq_ver" 0.15.0) < 0 )); then
+		info "aquamarine $aq_ver predates the fix; run: sudo pacman -Syu"
 	else
-		info "pinning: without this a routine -Syu silently restores stock and 4K breaks"
-		sudo sed -i 's/^#*\s*IgnorePkg\s*=.*/&\nIgnorePkg   = aquamarine/' /etc/pacman.conf ||
-			echo "IgnorePkg   = aquamarine" | sudo tee -a /etc/pacman.conf >/dev/null
+		info "aquamarine ${aq_ver:-not installed}: ok"
 	fi
 fi
 

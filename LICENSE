@@ -1,11 +1,8 @@
 Kernel patches under kernel/patches/ are derived from the Linux kernel and are
 licensed GPL-2.0-only, matching the files they modify.
 
-aquamarine/intel-primary-4k.patch is derived from aquamarine and follows its
-BSD-3-Clause licence.
-
-Everything else in this repository -- scripts under system/, documentation, and
-the packaging files -- is MIT:
+Everything else in this repository -- scripts under system/ and the
+documentation -- is MIT:
 
 Copyright (c) 2026 the contributors
 

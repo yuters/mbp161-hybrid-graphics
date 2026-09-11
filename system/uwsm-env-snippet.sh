@@ -2,7 +2,7 @@
 # Append to ~/.config/uwsm/env (or the equivalent for your session manager).
 #
 # Intel must be the PRIMARY device and AMD the secondary. That ordering
-# requires the patched aquamarine in this repo; on stock aquamarine a 4K
+# requires aquamarine 0.15.0 or newer; on 0.14.0 and older a 4K
 # modeset on the secondary AMD backend fails drmModeAddFB2WithModifiers and
 # the external head scans out a stale buffer -- you get a quarter-screen
 # desktop.

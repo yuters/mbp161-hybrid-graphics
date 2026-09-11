@@ -23,7 +23,7 @@ This is what the machine does with these patches applied:
 - `MacBookPro16,1` — Intel UHD 630 (`8086:9bc4` at `00:02.0`), AMD Navi 14
   (`1002:7340` at `03:00.0`), Apple gmux, two Intel JHL7540 Titan Ridge USB-C
   controllers, Apple T2.
-- [Omarchy](https://omarchy.org/) (Hyprland via uwsm, aquamarine 0.14.0, Limine).
+- [Omarchy](https://omarchy.org/) (Hyprland via uwsm, aquamarine 0.15.0, Limine).
   The stock installer detects a T2 Mac and installs `linux-t2` itself.
 - Kernel patches sit on Linux 7.2 with the [t2linux](https://wiki.t2linux.org/)
   v7.2-rc6 stack, which Omarchy already ships.
@@ -54,8 +54,10 @@ compositor's primary GPU, the external head is fed by a cross-GPU blit. On a
 mode change aquamarine handed amdgpu a buffer it rejects,
 `drmModeAddFB2WithModifiers` failed, and the display scanned out a stale
 buffer.
-→ `aquamarine/intel-primary-4k.patch` selects the fresh, mode-sized consumer
-buffer before deciding whether to import or blit.
+→ Fixed upstream in aquamarine 0.15.0: a modeset commit now takes a fresh,
+mode-sized buffer from the swapchain before it is imported or blitted. Stock
+aquamarine is correct from 0.15.0 on; 0.14.0 and older still draw the
+quarter-screen desktop. This repo used to carry that fix as a patch.
 
 **4. Idle power, and a hard lock.** The discrete GPU idled at 25 W. The obvious
 fix — `power_dpm_force_performance_level=auto` — **hung the machine in this
@@ -99,7 +101,7 @@ nothing to rebuild:
 ./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
 ```
 
-That does the kernel, aquamarine, scripts, units, lid policy, command line,
+That does the kernel, scripts, units, lid policy, command line,
 session GPU selection and services, and is safe to re-run. A `.pkg.tar.zst`
 survives a full OS reinstall, so keeping one turns a 100-minute rebuild into a
 30-second install.
@@ -111,8 +113,8 @@ See [docs/INSTALL.md](docs/INSTALL.md) for the full procedure. In short:
 2. Boot it. `apple_gmux.force_igd` now defaults on for this model by DMI; see
    [the kernel command line notes](docs/INSTALL.md#2-kernel-command-line) for
    the one parameter that needs a decision.
-3. Build the patched aquamarine (`aquamarine/`) and pin it so a routine
-   `pacman -Syu` cannot silently revert you.
+3. Use stock aquamarine 0.15.0 or newer. Do not pin it: Hyprland is built
+   against a matching aquamarine, so a pin makes `pacman -Syu` fail.
 4. Install `system/bin/*`, `system/systemd/*`, the Limine `default_entry`
    hook, and the `uwsm` env snippet.
 
@@ -223,5 +225,4 @@ blanket claim about Navi 14.
 
 ## Licence
 
-Kernel patches are GPL-2.0, matching Linux. The aquamarine patch follows
-aquamarine's BSD-3-Clause. Scripts and documentation are MIT.
+Kernel patches are GPL-2.0, matching Linux. Scripts and documentation are MIT.

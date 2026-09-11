@@ -13,10 +13,11 @@ anything:
 ./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
 ```
 
-That installs the kernel, builds and pins the patched aquamarine, installs the
-scripts, units and lid policy, writes the kernel command line, appends the
-session GPU selection, and enables the services. It is idempotent; re-running is
-safe. `./install.sh --skip-kernel` does everything except the kernel.
+That installs the kernel, scripts, units and lid policy, removes the aquamarine
+pin older versions of this repo added, writes the kernel command line, appends
+the session GPU selection, and enables the services. It is idempotent;
+re-running is safe. `./install.sh --skip-kernel` does everything except the
+kernel.
 
 **A kernel package survives a full OS reinstall.** It is a normal
 `.pkg.tar.zst`. Keeping one on a separate partition turns a 100-minute rebuild
@@ -116,22 +117,14 @@ Regenerate your initramfs / UKI afterwards.
 
 ## 3. aquamarine
 
-Required for Intel-primary. On stock aquamarine you get a quarter-screen 4K
+Nothing to build. The Intel-primary 4K fix is upstream in aquamarine 0.15.0,
+so use the stock package. On 0.14.0 and older you get a quarter-screen 4K
 desktop.
 
-```sh
-cd aquamarine
-makepkg -si
-```
-
-Then pin it, or the next `pacman -Syu` silently reverts you to a broken display
-with no obvious cause. In `/etc/pacman.conf`:
-
-```
-IgnorePkg = aquamarine
-```
-
-Re-apply the patch and bump `pkgrel` when you deliberately update aquamarine.
+Do not pin it. If an earlier version of this repo added
+`IgnorePkg = aquamarine` to `/etc/pacman.conf`, remove that line: aquamarine
+0.15.0 changed its soname, Hyprland is rebuilt against it, and the pin makes
+`pacman -Syu` fail on Hyprland's dependency.
 
 ## 4. System services
 
