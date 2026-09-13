@@ -1,7 +1,7 @@
-Kernel patches under kernel/patches/ are derived from the Linux kernel and are
+Kernel patches under kernel/patches/ and research/ are derived from the Linux kernel and are
 licensed GPL-2.0-only, matching the files they modify.
 
-Everything else in this repository -- scripts under system/ and the
+Everything else in this repository -- scripts under tools/ and configuration under system/ and the
 documentation -- is MIT:
 
 Copyright (c) 2026 the contributors

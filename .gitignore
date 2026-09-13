@@ -1,5 +1,11 @@
 *.pkg.tar.zst
 *.ko
 *.ko.zst
+*.efi
+*.bin
+*.bin.zst
+*.kc
+__pycache__/
+build/
 src/
 pkg/

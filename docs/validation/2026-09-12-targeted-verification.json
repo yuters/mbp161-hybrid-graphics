@@ -1,0 +1,14 @@
+{
+  "kernel_error_markers": [],
+  "current_policy": "auto",
+  "test_sequence_mhz": [
+    95,
+    496,
+    95,
+    736,
+    750,
+    736,
+    496,
+    750
+  ]
+}

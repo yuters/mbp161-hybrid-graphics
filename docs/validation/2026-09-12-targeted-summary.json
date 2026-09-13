@@ -1,0 +1,72 @@
+{
+  "completed": true,
+  "failure": null,
+  "restored": true,
+  "steps": [
+    {
+      "level": 0,
+      "target_mhz": 95,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "95000000": 12
+      }
+    },
+    {
+      "level": 1,
+      "target_mhz": 496,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "496000000": 12
+      }
+    },
+    {
+      "level": 0,
+      "target_mhz": 95,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "95000000": 12
+      }
+    },
+    {
+      "level": 2,
+      "target_mhz": 736,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "736000000": 12
+      }
+    },
+    {
+      "level": 3,
+      "target_mhz": 750,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "750000000": 12
+      }
+    },
+    {
+      "level": 2,
+      "target_mhz": 736,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "736000000": 12
+      }
+    },
+    {
+      "level": 1,
+      "target_mhz": 496,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "496000000": 12
+      }
+    },
+    {
+      "level": 3,
+      "target_mhz": 750,
+      "exact_target_samples": 12,
+      "counts_hz": {
+        "750000000": 12
+      }
+    }
+  ],
+  "final_policy": "auto"
+}

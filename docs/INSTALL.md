@@ -1,199 +1,139 @@
-# Install
+# Build and stage Falcon support
 
-Read [the warnings](../README.md#do-not-do-these) first. One of them will hang
-your machine if you ignore it.
+Start with a working Omarchy install and retain its current recovery boot
+entry. This procedure builds **only amdgpu**, not a complete kernel. It does
+not use the previous `install.sh`, which installed an incompatible workaround
+stack. Existing users should read [migration](MIGRATION.md) first.
 
-## The short path
+The verified kernel is `7.2.4-arch1-Watanare-T2-1-t2`. Other kernels require
+source/ABI review and their own build. Matching the version string alone is
+insufficient: preserve the distro's configuration and T2 patches.
 
-If you already have a kernel package built from `kernel/patches/*.patch` — from
-a previous install of yours, or built once and kept — you do not need to rebuild
-anything:
+## 1. Extract locally
 
-```sh
-./install.sh --kernel-package /path/to/linux-t2-mbp161-hybrid-*.pkg.tar.zst
-```
+Obtain the uncompressed `SystemKernelExtensions.kc` from your own macOS
+installation. The verified payload was found in macOS 26.6.2 (25G83); another
+collection is accepted only if it contains the identical signed payload.
+No APFS mount, macOS download or firmware installation is automated here.
 
-That installs the kernel, scripts, units and lid policy, removes the aquamarine
-pin older versions of this repo added, writes the kernel command line, appends
-the session GPU selection, and enables the services. It is idempotent;
-re-running is safe. `./install.sh --skip-kernel` does everything except the
-kernel.
-
-**A kernel package survives a full OS reinstall.** It is a normal
-`.pkg.tar.zst`. Keeping one on a separate partition turns a 100-minute rebuild
-into a 30-second `pacman -U`. The rest of this document is the long path: how to
-build that package the first time.
-
-## Prerequisite: a booting install first
-
-This is for [Omarchy](https://omarchy.org/) on a `MacBookPro16,1`. Apply it on
-top of an install that already boots and logs in. The stock Omarchy installer
-detects a T2 Mac and installs `linux-t2` for you; there is nothing extra to add.
-
-Keep the distro kernel (`linux-t2`) installed. `install.sh` puts
-`linux-t2-mbp161-hybrid` first in the menu (`BOOT_ORDER`) and sets Limine's
-`default_entry` to `Omarchy/linux-t2-mbp161-hybrid`. Those are different
-knobs: `BOOT_ORDER` is limine-entry-tool's menu sort; Limine auto-boots
-`default_entry` (a path or a 1-based index, see CONFIG.md). Using only
-`BOOT_ORDER` does not change auto-boot if `default_entry` already names a
-specific kernel — which a previous config on this machine did
-(`Omarchy/linux-t2`).
-
-## 0. Prerequisites
-
-Omarchy on this machine already provides the T2 stack (keyboard, trackpad,
-audio, NVMe, Wi-Fi). This repo adds hybrid graphics on top.
-
-You also need `apple-set-os` (or an equivalent EFI shim) so that the iGPU is
-visible in `lspci -s 00:02.0`. Without it the mux switch has nowhere to go:
+From the repository directory:
 
 ```sh
-lspci -s 00:02.0     # must show the Intel VGA controller
-lspci -s 03:00.0     # must show the AMD Navi 14
+mkdir -p build
+zstd -dc /usr/lib/firmware/amdgpu/navi14_smc.bin.zst > build/navi14_smc.bin
+python3 tools/extract-firmware.py /path/to/SystemKernelExtensions.kc \
+    build/navi14_smc.bin build/navi14_falcon_smc.bin > build/firmware-manifest.json
 ```
 
-## 1. Kernel
+If the installed template is already uncompressed, copy that file to
+`build/navi14_smc.bin` instead. Both inputs are hash checked against the
+[verified pair](VALIDATION.md#build-and-firmware-checks). Unknown versions are
+rejected. Do not weaken the checks to make a different image pass. Extraction
+refuses to overwrite an existing output file.
 
-Start from Linux 7.2 with the t2linux v7.2-rc6 patch stack applied, then:
+## 2. Build the module
+
+Obtain the **exact source and T2 changes for the installed kernel**, plus its
+matching prepared headers, compiler and normal kernel module build tools.
+Do not use the old five-patch repository kernel or an experimental source tree
+containing clock pins, alternate loaders or suspend bypasses.
 
 ```sh
-cd linux
-for p in /path/to/mbp161-hybrid-graphics/kernel/patches/*.patch; do
-    patch -p1 < "$p"
-done
+JOBS=6 tools/build-amdgpu.sh /path/to/exact-kernel-source build/falcon-module
 ```
 
-Confirm `CONFIG_APPLE_GMUX=y` (or `=m`) — patches 2 and 3 call
-`apple_gmux_panel_is_igd()` and fall back to a stub without it.
+The helper copies GPU sources to the output directory, applies the Falcon
+patch without fuzz, and builds against `/usr/lib/modules/$(uname -r)/build`.
+It preserves the input tree. Results include `amdgpu.ko`, `build.log` and
+`module-manifest.json`. It does not install anything or sign the module.
+Use the system's module-signing procedure if signature enforcement is enabled.
+A distro kernel update requires a compatible rebuild; no DKMS integration is
+claimed here.
 
-Build and install with `make pacman-pkg`, but **set `PACMAN_PKGBASE`
-explicitly**:
+## 3. Create an isolated test image
+
+Use a separate module root and a separate UKI, as in the reference test. Do
+not put an experimental module in global `updates/` and call the other menu
+entries stock: entries that load modules from that directory would use it too.
+
+These staging commands assume the usual Omarchy `/usr/lib/modules` layout:
 
 ```sh
-PACMAN_PKGBASE=linux-t2-mbp161-hybrid make pacman-pkg
+release=$(uname -r)
+mkdir -p build/module-root/usr/lib/modules
+ln -s usr/lib build/module-root/lib
+cp -a --reflink=auto "/usr/lib/modules/$release" build/module-root/usr/lib/modules/
 ```
 
-Without it the package is named `linux-upstream` and installs *alongside* your
-real kernel rather than replacing it. `PACMAN_PKGBASE` is also the Limine
-entry name.
+Inspect the copied tree for locally installed overrides (including `updates/`
+and `extra/`). Remove conflicting **amdgpu overrides from this staging copy**;
+keep other required modules. Replace its packaged amdgpu file with
+`build/falcon-module/amdgpu.ko`, keeping exactly one candidate amdgpu module,
+then run `depmod -b "$PWD/build/module-root" "$release"`. Check that
+`modinfo -b "$PWD/build/module-root" -k "$release" -n amdgpu` resolves to it.
+Do not change the live module tree during this procedure.
 
-After installing, verify the package owns every file it should — this catches
-modules you hot-replaced during testing and forgot about:
+Prepare a private mkinitcpio configuration that preserves your existing
+storage/encryption, keyboard, T2 and other required hooks. An explicit `-c`
+configuration does not automatically source the normal configuration drop-ins;
+include their effective settings. Add `amdgpu` to `MODULES` so the candidate
+loads before switching to the real root. Use a local final build hook with:
 
 ```sh
-sudo pacman -Qkk linux-t2-mbp161-hybrid      # expect zero altered files
+build() {
+    add_file /absolute/path/to/build/navi14_falcon_smc.bin \
+        /usr/lib/firmware/amdgpu/navi14_falcon_smc.bin
+}
 ```
 
-## 2. Kernel command line
+That embeds the extracted file at its expected path without replacing the
+installed firmware. If using `mkinitcpio -D` for the custom hook directory,
+also include `/etc/initcpio` and `/usr/lib/initcpio`: `-D` replaces the default
+hook search path rather than merely appending to it.
 
-Patch 1 makes `force_igd` default on for `MacBookPro16,1` by DMI, so nothing is
-strictly required. Two parameters are worth knowing about:
+Prepare the candidate command line from your working entry, preserving all
+root, encryption and machine-specific arguments. Select `amdgpu.apple_falcon=1`;
+remove the older `amdgpu.smu_alt_smc=falcon` option and forced-Intel/clock-pin
+options from this candidate. With the old custom gmux patch still compiled in,
+removing `force_igd=1` alone is insufficient; use the clean distro baseline.
 
-```
-apple_gmux.force_igd=0     # escape hatch: boot WITHOUT the mux switch
-amdgpu.runpm=0             # see below
-```
-
-**`amdgpu.runpm` needs a decision, and I owe you honesty about it.** The
-reference machine ran `amdgpu.runpm=-2` ("auto with power down when displays are
-attached"), but it did so alongside a larger research tree that is deliberately
-not shipped here — including a gmux runtime-PM path and an `amdgpu.gmux_runpm`
-parameter that **does not exist** in a clean build. If you copied that command
-line from a write-up of this work, drop `amdgpu.gmux_runpm`; it will be silently
-ignored at best.
-
-With only the patches in this repo, amdgpu has no gmux runtime-PM support,
-so the discrete GPU simply stays bound and awake — which is what this
-configuration wants, since it is driving the external display and since runtime
-suspending it is close to what breaks suspend in the first place.
-`amdgpu.runpm=0` states that intent explicitly, and it is **now the tested
-value**: a build from only these patches was booted with
-`apple_gmux.force_igd=1 amdgpu.runpm=0` and behaved correctly —
-`/sys/bus/pci/devices/0000:03:00.0/power/control` reads `on`,
-`runtime_suspended_time` stays `0`, the GPU never attempts a runtime suspend,
-and both displays plus s2idle work. Use `runpm=0`.
-
-Regenerate your initramfs / UKI afterwards.
-
-## 3. aquamarine
-
-Nothing to build. The Intel-primary 4K fix is upstream in aquamarine 0.15.0,
-so use the stock package. On 0.14.0 and older you get a quarter-screen 4K
-desktop.
-
-Do not pin it. If an earlier version of this repo added
-`IgnorePkg = aquamarine` to `/etc/pacman.conf`, remove that line: aquamarine
-0.15.0 changed its soname, Hyprland is rebuilt against it, and the pin makes
-`pacman -Syu` fail on Hyprland's dependency.
-
-## 4. System services
+Build the UKI with the matching kernel image and staged module root:
 
 ```sh
-sudo install -m755 system/bin/mbp161-amdgpu-hybrid-prep      /usr/local/bin/
-sudo install -m755 system/bin/mbp161-amdgpu-dpm-governor     /usr/local/bin/
-sudo install -m644 system/systemd/mbp161-hybrid-prep.service            /etc/systemd/system/
-sudo install -m644 system/systemd/mbp161-amdgpu-dpm-governor.service    /etc/systemd/system/
-sudo install -Dm644 system/systemd/30-mbp161-lid-safety.conf \
-     /etc/systemd/logind.conf.d/30-mbp161-lid-safety.conf
-
-sudo install -m755 system/boot-hooks/80-mbp161-default-entry \
-     /etc/boot/hooks/post.d/80-mbp161-default-entry
-
-sudo systemctl daemon-reload
-sudo systemctl enable mbp161-hybrid-prep.service
-sudo systemctl enable mbp161-amdgpu-dpm-governor.service
-sudo limine-update
+sudo mkinitcpio -r "$PWD/build/module-root" -k "$release" \
+    --kernelimage "/usr/lib/modules/$release/vmlinuz" \
+    -c /path/to/private-mkinitcpio.conf --cmdline /path/to/falcon.cmdline \
+    -D /path/to/custom-initcpio -D /etc/initcpio -D /usr/lib/initcpio \
+    --nopost -U "$PWD/build/omarchy-falcon.efi"
 ```
 
-The Limine post-hook rewrites `default_entry` to the patched kernel after
-`limine-update`.
+Before installing, extract the UKI sections (`objcopy --dump-section`) and
+inspect its initrd (`lsinitcpio`). Verify exact kernel, module, firmware and
+command-line contents against the intended files. Create a recovery image
+embedding the packaged stock module as well. Intel scanout can be a recovery
+choice; it is not part of the Falcon fix.
 
-`mbp161-hybrid-prep` must run **before** the display manager. It sets a static
-DPM level and turns off the phantom AMD eDP connector. If it has not run, the
-session env snippet below deliberately falls back to Intel-only rather than
-opening the AMD GPU at a level that will hang the machine.
+Back up the Limine menu, copy the verified UKI to a new path under
+`/boot/EFI/Linux/`, and append a separate EFI entry following your existing
+menu format and integrity-hash policy. Preserve the working default. Machine
+UUIDs, an encrypted-root command line, boot-menu defaults and binary images
+from the reference machine are deliberately not supplied as generic files.
 
-## 5. Session environment
+## 4. Verify the boot
 
-Append `system/uwsm-env-snippet.sh` to `~/.config/uwsm/env` (or your session
-manager's equivalent). It sets `AQ_DRM_DEVICES` to Intel-first and only opens
-AMD when DPM is already at a static level.
-
-## 6. Verify
-
-Reboot, log in normally, then:
+Check the loaded module against **your build's** manifest, the firmware
+version/interface, and the successful `Falcon UCLK rule initialized (0x4b, 1)`
+log. Check that AMD's internal eDP connector is enabled and DPM is `auto`.
 
 ```sh
-# both GPUs present, both outputs live
-hyprctl monitors | grep -E '^Monitor|[0-9]+x[0-9]+@'
-
-# DPM is static, never `auto`
+cat /sys/module/amdgpu/srcversion
+journalctl -k -b --no-pager | rg 'Falcon|smu.*version'
 cat /sys/bus/pci/devices/0000:03:00.0/power_dpm_force_performance_level
-
-# idle power, expect roughly 4-5 W
-cat /sys/class/drm/card1/device/hwmon/hwmon*/power1_average
+cat /sys/bus/pci/devices/0000:03:00.0/hwmon/hwmon*/freq2_input
 ```
 
-Plug the external display in **after** boot. A cold boot with the cable already
-attached produces no hotplug event; replug it.
-
-## 7. Optional: verify suspend
-
-```sh
-systemctl suspend
-```
-
-To measure how long it actually slept — kernel and journal timestamps cannot
-tell you, because printk does not advance across the sleep and journald stamps
-its whole backlog at flush:
-
-```sh
-python3 -c 'import time; print("%.2f s suspended since boot" % (
-    time.clock_gettime(time.CLOCK_BOOTTIME) -
-    time.clock_gettime(time.CLOCK_MONOTONIC)))'
-```
-
-For sleep *power*, unplug the charger first — on AC the battery does not
-discharge and you will measure nothing. Sample
-`/sys/class/power_supply/BAT0/charge_now` before and after, and subtract the
-awake portion of the bracket or you will overstate the figure.
+Follow [validation](VALIDATION.md) to distinguish a working 750-MHz desktop
+from a tested intermediate transition. Save work before deliberate transition
+or suspend tests. Avoid an intermediate maximum while a live display requires
+750 MHz; restore `auto` before bringing the display back on. The previous
+blanket instruction to never use `auto` described a different firmware setup.

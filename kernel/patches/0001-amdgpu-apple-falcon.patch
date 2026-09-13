@@ -1,0 +1,225 @@
+Subject: [PATCH] drm/amd/pm: opt in to Apple Falcon SMC on MacBookPro16,1
+
+Load the locally extracted, PSP-signed Apple Navi14 image on the verified
+1002:7340 / 106b:020f revision 0x40 board. Require firmware 0x04350b03 and
+interface 0x36, use legacy metrics in both readers, and initialize Falcon's
+0x4b UCLK rule in the hardware setup shared by boot, reset and resume.
+Propagate initialization failures and avoid unsupported generic messages.
+
+No UCLK pin, gmux rerouting, PCI suspend bypass or userspace governor.
+Tested against 7.2.4-arch1-Watanare-T2-1-t2; see docs/VALIDATION.md for scope.
+Resume hook coverage is a source-level property, not a successful sleep test.
+
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/inc/smu_types.h b/drivers/gpu/drm/amd/pm/swsmu/inc/smu_types.h
+--- a/drivers/gpu/drm/amd/pm/swsmu/inc/smu_types.h
++++ b/drivers/gpu/drm/amd/pm/swsmu/inc/smu_types.h
+@@ -196,6 +196,7 @@
+ 	__SMU_DUMMY_MAP(SET_DRIVER_DUMMY_TABLE_DRAM_ADDR_HIGH), \
+ 	__SMU_DUMMY_MAP(SET_DRIVER_DUMMY_TABLE_DRAM_ADDR_LOW), \
+ 	__SMU_DUMMY_MAP(GET_UMC_FW_WA), \
++	__SMU_DUMMY_MAP(FALCON_UCLK_RULE), \
+ 	__SMU_DUMMY_MAP(Mode1Reset), \
+ 	__SMU_DUMMY_MAP(RlcPowerNotify),                 \
+ 	__SMU_DUMMY_MAP(SetHardMinIspiclkByFreq),        \
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/inc/smu_v11_0.h b/drivers/gpu/drm/amd/pm/swsmu/inc/smu_v11_0.h
+--- a/drivers/gpu/drm/amd/pm/swsmu/inc/smu_v11_0.h
++++ b/drivers/gpu/drm/amd/pm/swsmu/inc/smu_v11_0.h
+@@ -24,6 +24,11 @@
+ #define __SMU_V11_0_H__
+ 
+ #include "amdgpu_smu.h"
++
++#define SMU11_APPLE_FALCON_VERSION 0x04350b03
++#define SMU11_APPLE_FALCON_IF_VERSION 0x36
++
++bool smu_v11_0_apple_falcon_selected(struct smu_context *smu);
+ 
+ /* MP Apertures */
+ #define MP0_Public			0x03800000
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c b/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/navi10_ppt.c
+@@ -72,6 +72,54 @@
+ };
+ 
+ #define SMU_11_0_GFX_BUSY_THRESHOLD 15
++
++/* Decoded in the verified Apple 53.11.3 image; absent in public Navi14 SMC. */
++#define PPSMC_MSG_FalconUclkRule 0x4b
++
++static bool navi10_fw_is_falcon(struct smu_context *smu)
++{
++	return smu_v11_0_apple_falcon_selected(smu) &&
++	       smu->smc_fw_version == SMU11_APPLE_FALCON_VERSION &&
++	       smu->smc_fw_if_version == SMU11_APPLE_FALCON_IF_VERSION;
++}
++
++static int navi10_check_fw_version(struct smu_context *smu)
++{
++	int ret = smu_cmn_check_fw_version(smu);
++
++	if (ret)
++		return ret;
++	if (smu_v11_0_apple_falcon_selected(smu) && !navi10_fw_is_falcon(smu)) {
++		dev_err(smu->adev->dev, "Unsupported Apple Falcon version/interface\n");
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static int navi10_system_features_control(struct smu_context *smu, bool en)
++{
++	int ret;
++
++	if (en && smu_v11_0_apple_falcon_selected(smu) && !navi10_fw_is_falcon(smu))
++		return -EINVAL;
++	ret = smu_v11_0_system_features_control(smu, en);
++	if (ret || !en || !navi10_fw_is_falcon(smu))
++		return ret;
++
++	/*
++	 * Apple sends this after feature enable. Use the hardware-setup path
++	 * shared by initial boot, reset and resume, before publishing DPM tables.
++	 * The decoded flag changes level-2 UMC programming. Four-state coverage
++	 * is limited to a short transition test; suspend remains unvalidated.
++	 */
++	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_FALCON_UCLK_RULE,
++					    1, NULL);
++	if (ret)
++		dev_err(smu->adev->dev, "Falcon UCLK rule initialization failed: %d\n", ret);
++	else
++		dev_info(smu->adev->dev, "Falcon UCLK rule initialized (0x4b, 1)\n");
++	return ret;
++}
+ 
+ #define SMU11_DRIVER_IF_VERSION_NV10  0x37
+ #define SMU11_DRIVER_IF_VERSION_NV12  0x38
+@@ -150,6 +198,7 @@
+ 	MSG_MAP(SET_DRIVER_DUMMY_TABLE_DRAM_ADDR_HIGH, PPSMC_MSG_SetDriverDummyTableDramAddrHigh, 0),
+ 	MSG_MAP(SET_DRIVER_DUMMY_TABLE_DRAM_ADDR_LOW, PPSMC_MSG_SetDriverDummyTableDramAddrLow, 0),
+ 	MSG_MAP(GET_UMC_FW_WA,			PPSMC_MSG_GetUMCFWWA,			0),
++	MSG_MAP(FALCON_UCLK_RULE, PPSMC_MSG_FalconUclkRule, 0),
+ };
+ 
+ static struct cmn2asic_mapping navi10_clk_map[SMU_CLK_COUNT] = {
+@@ -909,6 +958,10 @@
+ 	struct amdgpu_device *adev = smu->adev;
+ 	int ret = 0;
+ 
++	/* Falcon uses the legacy metrics layout despite its program byte. */
++	if (navi10_fw_is_falcon(smu))
++		return navi10_get_legacy_smu_metrics_data(smu, member, value);
++
+ 	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
+ 	case IP_VERSION(11, 0, 9):
+ 		if (smu->smc_fw_version > 0x00341C00)
+@@ -2661,6 +2714,10 @@
+ 	uint32_t param;
+ 	int ret = 0;
+ 
++	/* Falcon has no generic 0x4e/0x4f/0x50 UMC-workaround messages. */
++	if (navi10_fw_is_falcon(smu))
++		return 0;
++
+ 	if (!navi10_need_umc_cdr_workaround(smu))
+ 		return 0;
+ 
+@@ -3158,6 +3215,10 @@
+ 	struct amdgpu_device *adev = smu->adev;
+ 	int ret = 0;
+ 
++	/* Falcon uses the legacy metrics layout despite its program byte. */
++	if (navi10_fw_is_falcon(smu))
++		return navi10_get_legacy_gpu_metrics(smu, table);
++
+ 	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
+ 	case IP_VERSION(11, 0, 9):
+ 		if (smu->smc_fw_version > 0x00341C00)
+@@ -3200,6 +3261,8 @@
+ 	 */
+ 	if (!smc_pptable->MGpuFanBoostLimitRpm)
+ 		return 0;
++	if (navi10_fw_is_falcon(smu))
++		return -EOPNOTSUPP; /* No message 0x4c in Falcon. */
+ 
+ 	/* Workaround for WS SKU */
+ 	if (adev->pdev->device == 0x7312 &&
+@@ -3312,12 +3375,12 @@
+ 	.check_fw_status = smu_v11_0_check_fw_status,
+ 	.setup_pptable = navi10_setup_pptable,
+ 	.get_vbios_bootup_values = smu_v11_0_get_vbios_bootup_values,
+-	.check_fw_version = smu_cmn_check_fw_version,
++	.check_fw_version = navi10_check_fw_version,
+ 	.write_pptable = smu_cmn_write_pptable,
+ 	.set_driver_table_location = smu_v11_0_set_driver_table_location,
+ 	.set_tool_table_location = smu_v11_0_set_tool_table_location,
+ 	.notify_memory_pool_location = smu_v11_0_notify_memory_pool_location,
+-	.system_features_control = smu_v11_0_system_features_control,
++	.system_features_control = navi10_system_features_control,
+ 	.init_display_count = smu_v11_0_init_display_count,
+ 	.set_allowed_mask = smu_v11_0_set_allowed_mask,
+ 	.get_enabled_mask = smu_cmn_get_enabled_mask,
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/smu11/smu_v11_0.c b/drivers/gpu/drm/amd/pm/swsmu/smu11/smu_v11_0.c
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/smu_v11_0.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/smu_v11_0.c
+@@ -59,6 +59,25 @@
+ MODULE_FIRMWARE("amdgpu/arcturus_smc.bin");
+ MODULE_FIRMWARE("amdgpu/navi10_smc.bin");
+ MODULE_FIRMWARE("amdgpu/navi14_smc.bin");
++MODULE_FIRMWARE("amdgpu/navi14_falcon_smc.bin");
++
++static bool apple_falcon;
++module_param(apple_falcon, bool, 0444);
++MODULE_PARM_DESC(apple_falcon,
++		"experimental Apple Falcon SMC on MacBookPro16,1 (default: false)");
++
++bool smu_v11_0_apple_falcon_selected(struct smu_context *smu)
++{
++	struct amdgpu_device *adev = smu->adev;
++
++	return apple_falcon && !amdgpu_sriov_vf(adev) &&
++	       amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(11, 0, 5) &&
++	       adev->pdev->vendor == 0x1002 && adev->pdev->device == 0x7340 &&
++	       adev->pdev->revision == 0x40 &&
++	       adev->pdev->subsystem_vendor == 0x106b &&
++	       adev->pdev->subsystem_device == 0x020f;
++}
++
+ MODULE_FIRMWARE("amdgpu/navi12_smc.bin");
+ MODULE_FIRMWARE("amdgpu/sienna_cichlid_smc.bin");
+ MODULE_FIRMWARE("amdgpu/navy_flounder_smc.bin");
+@@ -104,15 +123,31 @@
+ 	     (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(11, 0, 7))))
+ 		return 0;
+ 
+-	amdgpu_ucode_ip_version_decode(adev, MP1_HWIP, ucode_prefix, sizeof(ucode_prefix));
+-	err = amdgpu_ucode_request(adev, &adev->pm.fw, AMDGPU_UCODE_REQUIRED,
+-				   "amdgpu/%s.bin", ucode_prefix);
++	if (smu_v11_0_apple_falcon_selected(smu)) {
++		if (adev->firmware.load_type != AMDGPU_FW_LOAD_PSP)
++			return -EINVAL;
++		err = amdgpu_ucode_request(adev, &adev->pm.fw, AMDGPU_UCODE_REQUIRED,
++					   "amdgpu/navi14_falcon_smc.bin");
++	} else {
++		amdgpu_ucode_ip_version_decode(adev, MP1_HWIP, ucode_prefix,
++					      sizeof(ucode_prefix));
++		err = amdgpu_ucode_request(adev, &adev->pm.fw, AMDGPU_UCODE_REQUIRED,
++					   "amdgpu/%s.bin", ucode_prefix);
++	}
+ 	if (err)
+ 		goto out;
+ 
+ 	hdr = (const struct smc_firmware_header_v1_0 *) adev->pm.fw->data;
+ 	amdgpu_ucode_print_smc_hdr(&hdr->header);
+ 	adev->pm.fw_version = le32_to_cpu(hdr->header.ucode_version);
++	if (smu_v11_0_apple_falcon_selected(smu) &&
++	    (adev->pm.fw_version != SMU11_APPLE_FALCON_VERSION ||
++	     le32_to_cpu(hdr->header.ucode_size_bytes) != 0x40200)) {
++		dev_err(adev->dev, "Unsupported Apple Falcon firmware image\n");
++		err = -EINVAL;
++		goto out;
++	}
++
+ 
+ 	if (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP) {
+ 		ucode = &adev->firmware.ucode[AMDGPU_UCODE_ID_SMC];
