@@ -50,13 +50,18 @@ power table is preserved.
 | Decompressed Linux template | `ffffaa9068ff481b653dc129abb13b7723a3d3d480b81685e90d0bf84751ea7a` |
 | Packaged Falcon container | `7a5053cd96e519021830dbd698875c273f63eab67998c9538c09948b8ce250e5` |
 
-## T2 NCM after deep sleep (13 September 2026)
+## T2 NCM after deep sleep
 
-Separate from Falcon clocks. Stock `t2bce_vhci` `B8FCE43DDFBFB6770941DC0`,
-`cdc_ncm` `964E35070A50E7AD7BD2970`. One `mem_sleep=deep` cycle. After
-wake, SET_INTERFACE data alt 0 then 1 both returned 0, TX bytes kept
-increasing with 0 errors, no `NETDEV WATCHDOG`, and no
-`parent should not be sleeping`. See [T2-NCM-S3.md](T2-NCM-S3.md).
+Separate from Falcon clocks. Stock `t2bce_vhci` `B8FCE43DDFBFB6770941DC0`.
+See [T2-NCM-S3.md](T2-NCM-S3.md). Patch 0002 closes the data alternate
+before sleep (native sequence).
+
+| Date | `cdc_ncm` | Result |
+|---|---|---|
+| 14 Sep | `F5DA9A6DDAE6EC24DC7CDD4` | Two S3 cycles; 12/12 T2 unicast replies |
+| 14 Sep | `17909571FF2AFE1A0781AEB` | One S3 after lock/restore review; 6/6 replies |
+
+A post-resume 0→1 toggle also recovered NCM; it is not in this tree.
 
 ## Still to test
 

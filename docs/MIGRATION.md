@@ -22,10 +22,10 @@ The earlier source is preserved at
 
 Removing the suspend bypass does **not** mean graphics suspend is a finished
 Falcon result. T2 internal Ethernet after deep sleep is a separate
-`cdc_ncm` patch ([T2-NCM-S3.md](T2-NCM-S3.md)); do not confuse it with the
-old PCI bypass. The Titan Ridge power-sequence patch is kept under
-`research/`, because it addresses a separate problem; do not apply it as
-part of the tested Falcon patch set.
+`cdc_ncm` patch ([T2-NCM-S3.md](T2-NCM-S3.md)): close the data alternate
+before sleep. Do not confuse it with the old PCI bypass. The Titan Ridge
+power-sequence patch is kept under `research/`; do not apply it as part
+of the tested Falcon patch set.
 
 ## Existing installations
 

@@ -1,0 +1,275 @@
+Subject: [PATCH] net: usb: cdc_ncm: close T2 data interface before system sleep
+
+Linux left the Apple T2 NCM data alternate (05ac:8233) at 1 across S3.
+Native AppleUSBNCMData sets alt 0 before root-domain sleep and enables
+after wake. Match that: alt 0 in PM_SUSPEND_PREPARE, restore in
+PM_POST_SUSPEND, usbnet kept quiesced so the USB device is still awake
+for those SET_INTERFACE calls.
+
+Do not call usb_autopm_get/put under usb_lock_device. Restore even if
+suspend_count is unexpected so abort/POST cannot leave alt 0.
+
+Tested on 7.2.4-arch1-Watanare-T2-1-t2 with stock t2bce_vhci
+(cdc_ncm 17909571FF2AFE1A0781AEB). See docs/T2-NCM-S3.md.
+
+diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
+--- a/drivers/net/usb/cdc_ncm.c
++++ b/drivers/net/usb/cdc_ncm.c
+@@ -45,6 +45,7 @@
+ #include <linux/ethtool.h>
+ #include <linux/kstrtox.h>
+ #include <linux/workqueue.h>
++#include <linux/suspend.h>
+ #include <linux/mii.h>
+ #include <linux/crc32.h>
+ #include <linux/usb.h>
+@@ -2124,11 +2125,219 @@
+ };
+ MODULE_DEVICE_TABLE(usb, cdc_devs);
+ 
++/*
++ * Experimental Apple T2 system-sleep lifecycle.
++ * Native AppleUSBNCMData disables the data alternate before root-domain sleep
++ * and enables it after wake. Keep usbnet quiesced across the complete PM
++ * transition so the interface can be changed while its device is awake.
++ * dev->data[0] belongs to cdc_ncm_ctx; [1] and [2] are unused by this driver.
++ *
++ * Do not call usb_autopm_get/put while holding usb_lock_device(): a runtime
++ * resume/autosuspend takes that lock. Restore even if suspend_count is
++ * unexpected; do not leave the function at alt 0.
++ */
++#define T2_NCM_QUIESCED 1UL
++
++static struct usb_driver cdc_ncm_driver;
++
++static bool cdc_ncm_t2_still_bound(struct usb_device *udev,
++				   struct usb_interface *intf,
++				   struct usbnet *dev)
++{
++	return udev->actconfig &&
++	       udev->state != USB_STATE_NOTATTACHED &&
++	       intf->condition == USB_INTERFACE_BOUND &&
++	       intf->dev.driver == &cdc_ncm_driver.driver &&
++	       usb_get_intfdata(intf) == dev &&
++	       dev->intf == intf;
++}
++
++static void cdc_ncm_t2_autopm_put(struct usb_device *udev,
++				  struct usb_interface *intf)
++{
++	usb_get_intf(intf);
++	usb_unlock_device(udev);
++	usb_autopm_put_interface(intf);
++	usb_put_intf(intf);
++	usb_lock_device(udev);
++}
++
++static int cdc_ncm_t2_restore_one(struct usb_device *udev,
++				  struct usb_interface *intf,
++				  struct usbnet *dev)
++{
++	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
++	unsigned int iface_no;
++	unsigned int saved_alt = (unsigned int)dev->data[2];
++	int restore_err;
++	int bad_count = dev->suspend_count != 1;
++
++	if (!ctx || !ctx->data)
++		return -ENODEV;
++
++	iface_no = ctx->data->cur_altsetting->desc.bInterfaceNumber;
++	if (bad_count)
++		dev_err(&intf->dev,
++			"t2 lifecycle: unbalanced PM count %u\n",
++			dev->suspend_count);
++
++	restore_err = usb_set_interface(udev, iface_no, saved_alt);
++	dev_info(&intf->dev,
++		 "t2 lifecycle: post-sleep alt %u status=%d count=%u\n",
++		 saved_alt, restore_err, dev->suspend_count);
++
++	dev->data[1] = 0;
++	if (dev->suspend_count)
++		usbnet_resume(intf);
++
++	if (restore_err || bad_count || dev->suspend_count) {
++		netif_device_detach(dev->net);
++		netif_carrier_off(dev->net);
++		if (!restore_err)
++			restore_err = -EBUSY;
++	}
++	return restore_err;
++}
++
++static int cdc_ncm_t2_prepare_one(struct usb_device *udev,
++				  struct usb_interface *intf,
++				  struct usbnet *dev)
++{
++	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
++	unsigned int iface_no;
++	int err;
++
++	if (dev->data[1] == T2_NCM_QUIESCED)
++		return -EBUSY;
++	if (!ctx || !ctx->data)
++		return 0;
++
++	usb_get_intf(intf);
++	usb_unlock_device(udev);
++	err = usb_autopm_get_interface(intf);
++	usb_lock_device(udev);
++	usb_put_intf(intf);
++	if (err)
++		return err;
++	if (!cdc_ncm_t2_still_bound(udev, intf, dev)) {
++		cdc_ncm_t2_autopm_put(udev, intf);
++		return -ENODEV;
++	}
++	if (dev->suspend_count) {
++		cdc_ncm_t2_autopm_put(udev, intf);
++		return -EBUSY;
++	}
++
++	ctx = (struct cdc_ncm_ctx *)dev->data[0];
++	if (!ctx || !ctx->data) {
++		cdc_ncm_t2_autopm_put(udev, intf);
++		return -ENODEV;
++	}
++	iface_no = ctx->data->cur_altsetting->desc.bInterfaceNumber;
++	dev->data[2] = ctx->data->cur_altsetting->desc.bAlternateSetting;
++	err = usbnet_suspend(intf, PMSG_SUSPEND);
++	if (err) {
++		cdc_ncm_t2_autopm_put(udev, intf);
++		return err;
++	}
++	dev->data[1] = T2_NCM_QUIESCED;
++	err = usb_set_interface(udev, iface_no, 0);
++	dev_info(&intf->dev,
++		 "t2 lifecycle: pre-sleep alt 0 status=%d count=%u\n",
++		 err, dev->suspend_count);
++	if (!err)
++		return 0;
++	cdc_ncm_t2_restore_one(udev, intf, dev);
++	cdc_ncm_t2_autopm_put(udev, intf);
++	return err;
++}
++
++static int cdc_ncm_t2_sleep_device(struct usb_device *udev, void *opaque)
++{
++	bool prepare = *(bool *)opaque;
++	struct usb_interface *intf;
++	struct usbnet *dev;
++	unsigned int i;
++	int err = 0, restore_err;
++
++	if (le16_to_cpu(udev->descriptor.idVendor) != 0x05ac ||
++	    le16_to_cpu(udev->descriptor.idProduct) != 0x8233)
++		return 0;
++
++	usb_lock_device(udev);
++	if (!udev->actconfig || udev->state == USB_STATE_NOTATTACHED)
++		goto unlock;
++
++	for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
++		intf = udev->actconfig->interface[i];
++		if (intf->dev.driver != &cdc_ncm_driver.driver ||
++		    intf->condition != USB_INTERFACE_BOUND)
++			continue;
++		dev = usb_get_intfdata(intf);
++		/* The control and claimed data interface share one usbnet. */
++		if (!dev || dev->intf != intf)
++			continue;
++
++		if (prepare) {
++			err = cdc_ncm_t2_prepare_one(udev, intf, dev);
++			if (err)
++				break;
++			continue;
++		}
++		if (dev->data[1] != T2_NCM_QUIESCED)
++			continue;
++		restore_err = cdc_ncm_t2_restore_one(udev, intf, dev);
++		cdc_ncm_t2_autopm_put(udev, intf);
++		if (restore_err) {
++			err = restore_err;
++			break;
++		}
++	}
++ unlock:
++	usb_unlock_device(udev);
++	return err;
++}
++
++static int cdc_ncm_t2_pm_notify(struct notifier_block *nb,
++			      unsigned long event, void *unused)
++{
++	bool prepare;
++	int err;
++
++	if (event != PM_SUSPEND_PREPARE && event != PM_POST_SUSPEND)
++		return NOTIFY_DONE;
++	prepare = event == PM_SUSPEND_PREPARE;
++	err = usb_for_each_dev(&prepare, cdc_ncm_t2_sleep_device);
++	if (err && prepare) {
++		/* Also unwind any earlier T2 devices, if there is more than one. */
++		prepare = false;
++		usb_for_each_dev(&prepare, cdc_ncm_t2_sleep_device);
++		return notifier_from_errno(err);
++	}
++	return NOTIFY_OK;
++}
++
++static struct notifier_block cdc_ncm_t2_pm_notifier = {
++	.notifier_call = cdc_ncm_t2_pm_notify,
++};
++
++static void cdc_ncm_disconnect(struct usb_interface *intf)
++{
++	struct usbnet *dev = usb_get_intfdata(intf);
++
++	/* USB holds the parent lock, serializing this with the PM notifier. */
++	if (dev && dev->data[1] == T2_NCM_QUIESCED) {
++		dev->data[1] = 0;
++		usb_autopm_put_interface_no_suspend(dev->intf);
++	}
++	usbnet_disconnect(intf);
++}
++
+ static struct usb_driver cdc_ncm_driver = {
+ 	.name = "cdc_ncm",
+ 	.id_table = cdc_devs,
+ 	.probe = usbnet_probe,
+-	.disconnect = usbnet_disconnect,
++	.disconnect = cdc_ncm_disconnect,
+ 	.suspend = usbnet_suspend,
+ 	.resume = usbnet_resume,
+ 	.reset_resume =	usbnet_resume,
+@@ -2136,7 +2345,27 @@
+ 	.disable_hub_initiated_lpm = 1,
+ };
+ 
+-module_usb_driver(cdc_ncm_driver);
++static int __init cdc_ncm_driver_init(void)
++{
++	int err;
++
++	err = register_pm_notifier(&cdc_ncm_t2_pm_notifier);
++	if (err)
++		return err;
++	err = usb_register(&cdc_ncm_driver);
++	if (err)
++		unregister_pm_notifier(&cdc_ncm_t2_pm_notifier);
++	return err;
++}
++module_init(cdc_ncm_driver_init);
++
++static void __exit cdc_ncm_exit(void)
++{
++	/* Drain notifier callbacks before removing bindings or module code. */
++	unregister_pm_notifier(&cdc_ncm_t2_pm_notifier);
++	usb_deregister(&cdc_ncm_driver);
++}
++module_exit(cdc_ncm_exit);
+ 
+ MODULE_AUTHOR("Hans Petter Selasky");
+ MODULE_DESCRIPTION("USB CDC NCM host driver");

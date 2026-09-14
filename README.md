@@ -49,9 +49,10 @@ sleep/power measurements from the Intel-routing workaround do not describe
 this configuration.
 
 T2 internal USB Ethernet (`cdc_ncm` on `05ac:8233`) hung after deep sleep
-on the reference machine even when Falcon graphics resumed. That is a
-separate `cdc_ncm` patch, [documented here](docs/T2-NCM-S3.md), tested for
-one S3 cycle with stock `t2bce_vhci`.
+on the reference machine even when Falcon graphics resumed. Linux left
+the data alternate at 1 across sleep; native AppleUSBNCMData sets alt 0
+before sleep. That is [patch 0002](docs/T2-NCM-S3.md), independent of
+Falcon.
 
 ## Use it
 
@@ -66,8 +67,8 @@ one S3 cycle with stock `t2bce_vhci`.
 
 See [kernel details](kernel/README.md) for the protocol changes and remaining
 Apple policy differences, [validation](docs/VALIDATION.md) for Falcon
-measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for the internal Ethernet
-sleep fix. The old automatic installer is intentionally gone: its global
+measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for internal Ethernet after
+sleep. The old automatic installer is intentionally gone: its global
 clock/routing/service changes do not implement this setup.
 
 ## Licence
