@@ -1,0 +1,148 @@
+Subject: [PATCH] net: usb: cdc_ncm: reopen Apple T2 NCM after system suspend
+
+After deep sleep on MacBookPro16,1, the T2 CDC NCM gadget stays bound
+but bulk transfers die. USB port reset and unbind/rebind recover it;
+VHCI endpoint reset/recreate do not. Replaying probe's data altsetting
+toggle (0 then 1) after system resume restores firmware transfer
+windows. Defer the toggle from a workqueue so it is not issued while
+the parent interface is still resuming. Gated to 05ac:8233 and system
+sleep; autosuspend is unchanged.
+
+Tested on 7.2.4-arch1-Watanare-T2-1-t2 with stock t2bce_vhci. See
+docs/T2-NCM-S3.md.
+
+diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
+--- a/drivers/net/usb/cdc_ncm.c
++++ b/drivers/net/usb/cdc_ncm.c
+@@ -45,6 +45,7 @@
+ #include <linux/ethtool.h>
+ #include <linux/kstrtox.h>
+ #include <linux/workqueue.h>
++#include <linux/slab.h>
+ #include <linux/mii.h>
+ #include <linux/crc32.h>
+ #include <linux/usb.h>
+@@ -2124,14 +2125,120 @@
+ };
+ MODULE_DEVICE_TABLE(usb, cdc_devs);
+ 
++#define T2_NCM_VENDOR	0x05ac
++#define T2_NCM_PRODUCT	0x8233
++#define T2_NCM_SLEEP_FLAG	1UL
++
++static bool cdc_ncm_is_t2(struct usbnet *dev)
++{
++	return dev && dev->udev &&
++		le16_to_cpu(dev->udev->descriptor.idVendor) == T2_NCM_VENDOR &&
++		le16_to_cpu(dev->udev->descriptor.idProduct) == T2_NCM_PRODUCT;
++}
++
++/*
++ * Unbind/rebind of this device after S3 recovered NCM without PORT_RESET
++ * because probe toggled the data altsetting 0 then 1. VHCI DESTROY/CREATE
++ * of the existing pipes did not. Replay that function re-init on system
++ * resume only; runtime autosuspend is left to usbnet.
++ */
++static int cdc_ncm_suspend(struct usb_interface *intf, pm_message_t message)
++{
++	struct usbnet *dev = usb_get_intfdata(intf);
++
++	if (dev && cdc_ncm_is_t2(dev) && !PMSG_IS_AUTO(message))
++		dev->data[1] = T2_NCM_SLEEP_FLAG;
++	return usbnet_suspend(intf, message);
++}
++
++struct t2_ncm_reopen {
++	struct work_struct work;
++	struct usb_interface *intf;
++};
++
++static int cdc_ncm_t2_toggle_data_alt(struct usb_interface *intf,
++				      struct usbnet *dev)
++{
++	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
++	u8 iface_no;
++	int err;
++
++	if (!ctx || !ctx->data)
++		return -ENODEV;
++
++	iface_no = ctx->data->cur_altsetting->desc.bInterfaceNumber;
++	err = usb_set_interface(dev->udev, iface_no, 0);
++	dev_info(&intf->dev, "t2 data alt 0 status=%d\n", err);
++	if (err)
++		return err;
++	usleep_range(10000, 20000);
++	err = usb_set_interface(dev->udev, iface_no,
++				CDC_NCM_DATA_ALTSETTING_NCM);
++	dev_info(&intf->dev, "t2 data alt 1 status=%d\n", err);
++	return err;
++}
++
++static void cdc_ncm_t2_reopen_work(struct work_struct *work)
++{
++	struct t2_ncm_reopen *reopen =
++		container_of(work, struct t2_ncm_reopen, work);
++	struct usb_interface *intf = reopen->intf;
++	struct usbnet *dev;
++
++	dev = usb_get_intfdata(intf);
++	if (!dev)
++		goto out_put;
++
++	usb_lock_device(dev->udev);
++	if (usb_get_intfdata(intf) == dev)
++		cdc_ncm_t2_toggle_data_alt(intf, dev);
++	usb_unlock_device(dev->udev);
++
++	dev->data[1] = 0;
++	usbnet_resume(intf);
++out_put:
++	usb_put_intf(intf);
++	kfree(reopen);
++}
++
++static int cdc_ncm_resume(struct usb_interface *intf)
++{
++	struct usbnet *dev = usb_get_intfdata(intf);
++	struct t2_ncm_reopen *reopen;
++
++	if (!dev || !cdc_ncm_is_t2(dev) || dev->data[1] != T2_NCM_SLEEP_FLAG)
++		return usbnet_resume(intf);
++
++	/* Last claimed interface: usbnet restarts URBs when suspend_count hits 0. */
++	if (dev->suspend_count != 1)
++		return usbnet_resume(intf);
++
++	/*
++	 * SET_INTERFACE during usb_resume_interface hits
++	 * "parent should not be sleeping" on the bulk endpoints.
++	 * Toggle after DPM complete, then usbnet_resume to submit URBs.
++	 */
++	reopen = kmalloc(sizeof(*reopen), GFP_KERNEL);
++	if (!reopen) {
++		cdc_ncm_t2_toggle_data_alt(intf, dev);
++		dev->data[1] = 0;
++		return usbnet_resume(intf);
++	}
++
++	INIT_WORK(&reopen->work, cdc_ncm_t2_reopen_work);
++	reopen->intf = usb_get_intf(intf);
++	schedule_work(&reopen->work);
++	return 0;
++}
++
+ static struct usb_driver cdc_ncm_driver = {
+ 	.name = "cdc_ncm",
+ 	.id_table = cdc_devs,
+ 	.probe = usbnet_probe,
+ 	.disconnect = usbnet_disconnect,
+-	.suspend = usbnet_suspend,
+-	.resume = usbnet_resume,
+-	.reset_resume =	usbnet_resume,
++	.suspend = cdc_ncm_suspend,
++	.resume = cdc_ncm_resume,
++	.reset_resume = cdc_ncm_resume,
+ 	.supports_autosuspend = 1,
+ 	.disable_hub_initiated_lpm = 1,
+ };

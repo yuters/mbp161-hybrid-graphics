@@ -50,12 +50,21 @@ power table is preserved.
 | Decompressed Linux template | `ffffaa9068ff481b653dc129abb13b7723a3d3d480b81685e90d0bf84751ea7a` |
 | Packaged Falcon container | `7a5053cd96e519021830dbd698875c273f63eab67998c9538c09948b8ce250e5` |
 
+## T2 NCM after deep sleep (13 September 2026)
+
+Separate from Falcon clocks. Stock `t2bce_vhci` `B8FCE43DDFBFB6770941DC0`,
+`cdc_ncm` `964E35070A50E7AD7BD2970`. One `mem_sleep=deep` cycle. After
+wake, SET_INTERFACE data alt 0 then 1 both returned 0, TX bytes kept
+increasing with 0 errors, no `NETDEV WATCHDOG`, and no
+`parent should not be sleeping`. See [T2-NCM-S3.md](T2-NCM-S3.md).
+
 ## Still to test
 
 Repeated transitions with GPU/memory work; cold and warm boots; AC/battery;
-suspend/resume and reset; external displays; other machines. A successful
-short clock test does not establish memory-data integrity under load, reliable
-suspend, macOS-equivalent policy or a completed hybrid-graphics solution.
+graphics suspend/resume and reset; external displays; other machines;
+repeated NCM S3 cycles. A successful short clock test does not establish
+memory-data integrity under load, reliable graphics suspend,
+macOS-equivalent policy or a completed hybrid-graphics solution.
 
 When measuring clocks, use the exact value from `hwmon/freq2_input` in Hz.
 The `pp_dpm_mclk` stars use a 25-MHz tolerance, so both 736 and 750 MHz may be

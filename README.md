@@ -42,10 +42,16 @@ set. It is not part of the tested Falcon configuration.
 | Panel | AMD eDP, 3072×1920 at 60 Hz |
 | Memory DPM | All four levels available; `auto` restored after testing |
 
-Repeated transitions under load, cold-boot reliability, suspend/resume,
-external displays and other boards/kernel releases remain unvalidated with
-this candidate. Touch ID is not addressed. Earlier sleep/power measurements
-from the Intel-routing workaround do not describe this configuration.
+Repeated transitions under load, cold-boot reliability, graphics
+suspend/resume, external displays and other boards/kernel releases remain
+unvalidated with the Falcon candidate. Touch ID is not addressed. Earlier
+sleep/power measurements from the Intel-routing workaround do not describe
+this configuration.
+
+T2 internal USB Ethernet (`cdc_ncm` on `05ac:8233`) hung after deep sleep
+on the reference machine even when Falcon graphics resumed. That is a
+separate `cdc_ncm` patch, [documented here](docs/T2-NCM-S3.md), tested for
+one S3 cycle with stock `t2bce_vhci`.
 
 ## Use it
 
@@ -59,9 +65,10 @@ from the Intel-routing workaround do not describe this configuration.
    firmware, retaining a self-contained recovery entry.
 
 See [kernel details](kernel/README.md) for the protocol changes and remaining
-Apple policy differences, and [validation](docs/VALIDATION.md) for measured
-results and their limits. The old automatic installer is intentionally gone:
-its global clock/routing/service changes do not implement this setup.
+Apple policy differences, [validation](docs/VALIDATION.md) for Falcon
+measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for the internal Ethernet
+sleep fix. The old automatic installer is intentionally gone: its global
+clock/routing/service changes do not implement this setup.
 
 ## Licence
 

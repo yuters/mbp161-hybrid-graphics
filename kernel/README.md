@@ -1,9 +1,17 @@
-# Active kernel patch
+# Active kernel patches
 
-Apply **only `patches/0001-amdgpu-apple-falcon.patch`** to the exact source for
-your installed kernel. The tested base is Linux 7.2.4 with the packaged
-Watanare T2 changes. The original three T2 AMD changes remain; this patch does
-not carry or replace them. No whole-kernel rebuild is required.
+Two independent patches, both against Linux 7.2.4 with the packaged
+Watanare T2 changes. No whole-kernel rebuild is required.
+
+| Patch | Module | What it is for |
+|---|---|---|
+| `patches/0001-amdgpu-apple-falcon.patch` | `amdgpu` | Falcon SMC / internal AMD panel |
+| `patches/0002-cdc-ncm-apple-t2-s3.patch` | `cdc_ncm` | T2 internal USB Ethernet after deep sleep |
+
+The original three T2 AMD changes remain; 0001 does not carry or replace
+them. 0002 does not change VHCI. Apply 0002 even if you are not using
+Falcon; it is gated to Apple T2 NCM (`05ac:8233`). See
+[T2 NCM S3](../docs/T2-NCM-S3.md).
 
 The patch is the tested Falcon v2 implementation, with only its test-status
 comment updated for publication. A new module build may have different

@@ -50,6 +50,12 @@ Use the system's module-signing procedure if signature enforcement is enabled.
 A distro kernel update requires a compatible rebuild; no DKMS integration is
 claimed here.
 
+The T2 NCM sleep patch is a second, independent module. Apply
+`kernel/patches/0002-cdc-ncm-apple-t2-s3.patch` to `drivers/net/usb/cdc_ncm.c`
+and build only `cdc_ncm` against the same headers. Details and the one-cycle
+S3 result are in [T2-NCM-S3.md](T2-NCM-S3.md). It does not replace the amdgpu
+procedure above.
+
 ## 3. Create an isolated test image
 
 Use a separate module root and a separate UKI, as in the reference test. Do
