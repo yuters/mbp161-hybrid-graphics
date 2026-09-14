@@ -5,8 +5,11 @@ but bulk transfers die. USB port reset and unbind/rebind recover it;
 VHCI endpoint reset/recreate do not. Replaying probe's data altsetting
 toggle (0 then 1) after system resume restores firmware transfer
 windows. Defer the toggle from a workqueue so it is not issued while
-the parent interface is still resuming. Gated to 05ac:8233 and system
-sleep; autosuspend is unchanged.
+the parent interface is still resuming. The deferred work takes a
+reference to the USB device and locks it before reading interface data,
+so a concurrent disconnect (unplug/rmmod/shutdown) cannot free the
+usbnet state under it. Gated to 05ac:8233 and system sleep; autosuspend
+is unchanged.
 
 Tested on 7.2.4-arch1-Watanare-T2-1-t2 with stock t2bce_vhci. See
 docs/T2-NCM-S3.md.
@@ -22,7 +25,7 @@ diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
  #include <linux/mii.h>
  #include <linux/crc32.h>
  #include <linux/usb.h>
-@@ -2124,14 +2125,120 @@
+@@ -2124,14 +2125,127 @@
  };
  MODULE_DEVICE_TABLE(usb, cdc_devs);
  
@@ -55,6 +58,7 @@ diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
 +struct t2_ncm_reopen {
 +	struct work_struct work;
 +	struct usb_interface *intf;
++	struct usb_device *udev;
 +};
 +
 +static int cdc_ncm_t2_toggle_data_alt(struct usb_interface *intf,
@@ -84,21 +88,26 @@ diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
 +	struct t2_ncm_reopen *reopen =
 +		container_of(work, struct t2_ncm_reopen, work);
 +	struct usb_interface *intf = reopen->intf;
++	struct usb_device *udev = reopen->udev;
 +	struct usbnet *dev;
 +
++	/*
++	 * Lock the (separately ref-counted) parent device before touching
++	 * intfdata: usb_lock_device() serialises against usbnet_disconnect(),
++	 * which frees the usbnet 'dev'. Reading dev->udev before locking would
++	 * race a concurrent disconnect (rmmod/unplug/shutdown) freeing dev.
++	 */
++	usb_lock_device(udev);
 +	dev = usb_get_intfdata(intf);
-+	if (!dev)
-+		goto out_put;
-+
-+	usb_lock_device(dev->udev);
-+	if (usb_get_intfdata(intf) == dev)
++	if (dev) {
 +		cdc_ncm_t2_toggle_data_alt(intf, dev);
-+	usb_unlock_device(dev->udev);
++		dev->data[1] = 0;
++		usbnet_resume(intf);
++	}
++	usb_unlock_device(udev);
 +
-+	dev->data[1] = 0;
-+	usbnet_resume(intf);
-+out_put:
 +	usb_put_intf(intf);
++	usb_put_dev(udev);
 +	kfree(reopen);
 +}
 +
@@ -128,6 +137,7 @@ diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
 +
 +	INIT_WORK(&reopen->work, cdc_ncm_t2_reopen_work);
 +	reopen->intf = usb_get_intf(intf);
++	reopen->udev = usb_get_dev(dev->udev);
 +	schedule_work(&reopen->work);
 +	return 0;
 +}

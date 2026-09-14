@@ -33,6 +33,11 @@ then alt 1, then `usbnet_resume` so URBs start on the new pipes. The
 toggle is deferred on a workqueue; doing it inside `cdc_ncm_resume`
 recovers NCM but logs `parent should not be sleeping`.
 
+The deferred work takes a `usb_get_dev()` reference to the parent device
+and `usb_lock_device()`s it *before* reading `usb_get_intfdata()`, so a
+concurrent disconnect (unplug/`rmmod`/shutdown) cannot free the usbnet
+state while the work is toggling.
+
 ## Validation (13 September 2026)
 
 Same machine and kernel as the Falcon module (`6AA8D5F52AD5DB85D2CFADC`).
@@ -42,6 +47,7 @@ Stock `t2bce_vhci` `B8FCE43DDFBFB6770941DC0`. One deep/S3 cycle per image.
 |---|---|---|
 | Inline SET_INTERFACE | `F15001FEFD548EF35879A88` | NCM TX advanced, 0 errors; two `parent should not be sleeping` warnings |
 | Deferred SET_INTERFACE | `964E35070A50E7AD7BD2970` | Same recovery, no those warnings |
+| Deferred + disconnect-race fix | `C8EB8EC2B9FF9EA3D620E21` | Same recovery; work now holds a udev ref + lock. Re-tested 13 Sep: TX 91 → 240 pkts, 0 errors, 0 watchdog, SMU resumed |
 
 On the deferred boot, alt 0 and alt 1 both returned 0. After wake, TX
 continued to increase (3492 → 10524 bytes in the capture window) with 0
