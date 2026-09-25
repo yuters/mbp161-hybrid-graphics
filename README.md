@@ -62,6 +62,11 @@ state; the loader patch keeps the firmware memory map identical across
 boots. 5/5 real restores on `7.2.6-arch2-Watanare-T2-2-t2`, where the
 Falcon and NCM patches also run unchanged.
 
+A 4K display on Apple's USB-C Digital AV Multiport Adapter was black at
+4K@60: the adapter advertises DSC and 4:2:2 but neither works through it,
+and macOS uses neither. [Patch 0004](docs/EXTERNAL-DISPLAY.md) makes amdgpu
+ignore both for that adapter, so 4K@60 falls back to YCbCr 4:2:0 as on macOS.
+
 ## Use it
 
 1. Read [migration notes](docs/MIGRATION.md) if you installed an older version.
@@ -76,7 +81,8 @@ Falcon and NCM patches also run unchanged.
 See [kernel details](kernel/README.md) for the protocol changes and remaining
 Apple policy differences, [validation](docs/VALIDATION.md) for Falcon
 measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for internal Ethernet after
-sleep, and [hibernation](docs/HIBERNATION.md) for S4. The old automatic installer is intentionally gone: its global
+sleep, [hibernation](docs/HIBERNATION.md) for S4, and
+[external display](docs/EXTERNAL-DISPLAY.md) for the USB-C AV adapter. The old automatic installer is intentionally gone: its global
 clock/routing/service changes do not implement this setup.
 
 ## Licence

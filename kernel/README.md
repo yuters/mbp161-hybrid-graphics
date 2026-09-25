@@ -1,14 +1,15 @@
 # Active kernel patches
 
-Three independent patches against the packaged Watanare T2 kernel. 0001
-and 0002 were written against 7.2.4 and apply unchanged to 7.2.6; 0003 is
-against 7.2.6. No whole-kernel rebuild is required.
+Four independent patches against the packaged Watanare T2 kernel. 0001
+and 0002 were written against 7.2.4 and apply unchanged to 7.2.6; 0003 and
+0004 are against 7.2.6. No whole-kernel rebuild is required.
 
 | Patch | Module | What it is for |
 |---|---|---|
 | `patches/0001-amdgpu-apple-falcon.patch` | `amdgpu` | Falcon SMC / internal AMD panel |
 | `patches/0002-cdc-ncm-t2-sleep-lifecycle.patch` | `cdc_ncm` | Close T2 NCM data alt before system sleep |
 | `patches/0003-t2bce-hibernate-rebuild-transport.patch` | `t2bce_core`, `t2bce_vhci`, `t2bce_audio` | Rebuild the T2 transport across hibernation |
+| `patches/0004-drm-amd-display-apple-usb-c-av-adapter.patch` | `amdgpu` | 4K@60 through Apple's USB-C AV adapter (no DSC / 4:2:2) |
 
 0003 needs the Limine patch in `../boot/patches/` as well; see
 [hibernation](../docs/HIBERNATION.md).

@@ -1,0 +1,50 @@
+Subject: [PATCH] drm/amd/display: no DSC or YCbCr 4:2:2 through Apple's USB-C AV adapter
+
+The Apple USB-C Digital AV Multiport Adapter (05ac:1463, DP branch OUI
+00-10-fa, device id "cHDMIb", FW 255.200) is a two-lane DP-to-HDMI converter
+that advertises a DSC 1.2 decoder and YCbCr 4:2:2 pass-through. 4K@60 RGB
+does not fit two lanes uncompressed, so amdgpu enables DSC; the adapter's
+decoder then reports RC buffer under-run and overflow (DPCD 0x20F = 0x03)
+and the HDMI sink stays blank. Forcing 4:2:2 at 4K@60 is blank as well, at
+any DSC target (16/12/10/8 bpp tested).
+
+macOS 26.6.2 on the same machine, adapter and display (AGDCDiagnose) keeps
+DSC disabled (0x160 = 0) and sends 4K@60 as YCbCr 4:2:0 over 2 x HBR3.
+
+Clear the DSC caps and the 4:2:2 pass-through/converter flags for this
+branch. Mode validation then rejects RGB (bandwidth; DP-HDMI converters
+stop at 8 bpc) and 4:2:2 (dongle caps), and settles on 4:2:0 exactly where
+macOS does. Modes that fit uncompressed stay RGB.
+
+Tested on MacBookPro16,1 (Navi14), 7.2.6-arch2-Watanare-T2-2-t2, Dell
+S2722QC over HDMI: 4K@60 now 4:2:0 without DSC with a picture, 4K@30 RGB.
+See docs/EXTERNAL-DISPLAY.md.
+
+diff --git a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
+--- a/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
++++ b/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
+@@ -2076,6 +2076,24 @@
+ 			DC_LOG_DSC("Clear DSC SUPPORT for USB4 link(%d) in TBT3 compatibility mode", link->link_index);
+ 		} else
+ 			link->wa_flags.dpia_forced_tbt3_mode = false;
++
++		/* Apple USB-C Digital AV Multiport Adapter (branch "cHDMIb") advertises
++		 * a DSC 1.2 decoder and YCbCr 4:2:2 pass-through, but with DSC its
++		 * decoder reports RC buffer under/overflow and HDMI stays blank, and
++		 * 4:2:2 at 4K60 is blank too. macOS never enables DSC on it and sends
++		 * 4K60 as YCbCr 4:2:0. Drop both so mode validation falls back to 4:2:0
++		 * for timings that do not fit its two lanes uncompressed.
++		 */
++		if (link->dpcd_caps.dongle_type == DISPLAY_DONGLE_DP_HDMI_CONVERTER &&
++				link->dpcd_caps.branch_dev_id == DP_BRANCH_DEVICE_ID_0010FA &&
++				!memcmp(link->dpcd_caps.branch_dev_name, "cHDMIb",
++					sizeof(link->dpcd_caps.branch_dev_name))) {
++			memset(&link->dpcd_caps.dsc_caps, '\0', sizeof(link->dpcd_caps.dsc_caps));
++			link->dpcd_caps.dongle_caps.is_dp_hdmi_ycbcr422_pass_through = false;
++			link->dpcd_caps.dongle_caps.is_dp_hdmi_ycbcr422_converter = false;
++			DC_LOG_DSC("Apple cHDMIb adapter on link %d: DSC and YCbCr 4:2:2 disabled",
++					link->link_index);
++		}
+ 	}
+ 
+ 	if (!dpcd_read_sink_ext_caps(link))
