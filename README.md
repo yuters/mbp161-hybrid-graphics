@@ -54,6 +54,14 @@ the data alternate at 1 across sleep; native AppleUSBNCMData sets alt 0
 before sleep. That is [patch 0002](docs/T2-NCM-S3.md), independent of
 Falcon.
 
+Hibernation (S4) works with [patch 0003](docs/HIBERNATION.md) for the T2
+BCE drivers and a Limine loader patch. The image-loading kernel's T2
+sign-on destroys every firmware queue of the hibernated kernel, so the
+patch rebuilds the T2 transport on restore instead of restoring saved
+state; the loader patch keeps the firmware memory map identical across
+boots. 5/5 real restores on `7.2.6-arch2-Watanare-T2-2-t2`, where the
+Falcon and NCM patches also run unchanged.
+
 ## Use it
 
 1. Read [migration notes](docs/MIGRATION.md) if you installed an older version.
@@ -68,7 +76,7 @@ Falcon.
 See [kernel details](kernel/README.md) for the protocol changes and remaining
 Apple policy differences, [validation](docs/VALIDATION.md) for Falcon
 measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for internal Ethernet after
-sleep. The old automatic installer is intentionally gone: its global
+sleep, and [hibernation](docs/HIBERNATION.md) for S4. The old automatic installer is intentionally gone: its global
 clock/routing/service changes do not implement this setup.
 
 ## Licence

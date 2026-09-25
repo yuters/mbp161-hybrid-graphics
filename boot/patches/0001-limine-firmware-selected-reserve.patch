@@ -1,0 +1,102 @@
+Subject: [PATCH] pmm: let EFI place the 64 MiB firmware reserve
+
+Limine keeps 64 MiB below 4 GiB for the firmware by allocating it itself,
+top-down, after claiming usable memory. On MacBookPro16,1 the Apple DXE
+allocator then has no room for later pool allocations except ACPI reclaim
+slack, so the E820 map after a post-hibernation boot gains an 8K RAM hole
+and Linux rejects the image ("Hibernate inconsistent memory map").
+
+Request the same 64 x 1 MiB with AllocatePages(AllocateMaxAddress,
+EfiLoaderData) before claiming conventional memory, refresh the map, claim
+the rest, then FreePages the reserve so it stays EFI reclaimable in
+Limine's map but available to the firmware. Map headroom grows to 512
+descriptors. No checksum bypass, no change to the reserve size.
+
+Against Limine 12.8.0 (89644f1). Tested on MacBookPro16,1 as the loader for
+the 5/5 S4 restores in docs/HIBERNATION.md (instrumented build for two,
+this clean build for three).
+
+diff --git i/common/mm/pmm.s2.c w/common/mm/pmm.s2.c
+index 308d6a0..873da19 100644
+--- i/common/mm/pmm.s2.c
++++ w/common/mm/pmm.s2.c
+@@ -423,7 +423,10 @@ void init_memmap(void) {
+ 
+     memmap_max_entries = (efi_mmap_size / efi_desc_size) + 512;
+ 
+-    efi_mmap_size += 4096;
++    // Headroom for the descriptors the firmware reserve below adds.
++    efi_mmap_size = CHECKED_ADD(efi_mmap_size,
++        CHECKED_MUL(512, efi_desc_size, goto fail), goto fail);
++    UINTN mmap_capacity = efi_mmap_size;
+ 
+     status = gBS->AllocatePool(EfiLoaderData, efi_mmap_size, (void **)&efi_mmap);
+     if (status) {
+@@ -456,6 +459,29 @@ void init_memmap(void) {
+         goto fail;
+     }
+ 
++    // Let EFI choose where its 64MiB reserve below 4GiB goes, before we claim
++    // the remaining usable pages. Placing it ourselves top-down can leave the
++    // firmware's own pool allocations nowhere to go but ACPI reclaim slack,
++    // which changes the E820 map between boots and breaks hibernation resume.
++    EFI_PHYSICAL_ADDRESS firmware_reserve[64];
++    size_t reserve_count = 0;
++    for (; reserve_count < 64; reserve_count++) {
++        EFI_PHYSICAL_ADDRESS address = 0xffffffff;
++        status = gBS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
++            0x100000 / PAGE_SIZE, &address);
++        if (status) {
++            goto release_reserve;
++        }
++        firmware_reserve[reserve_count] = address;
++    }
++
++    efi_mmap_size = mmap_capacity;
++    status = gBS->GetMemoryMap(&efi_mmap_size, efi_mmap, &mmap_key,
++        &efi_desc_size, &efi_desc_ver);
++    if (status || efi_desc_size < sizeof(EFI_MEMORY_DESCRIPTOR)) {
++        goto release_reserve;
++    }
++
+     size_t entry_count = efi_mmap_size / efi_desc_size;
+ 
+     for (size_t i = 0; i < entry_count; i++) {
+@@ -507,11 +533,6 @@ void init_memmap(void) {
+ 
+     allocations_disallowed = false;
+ 
+-    // Let's leave 64MiB to the firmware below 4GiB
+-    for (size_t i = 0; i < 64; i++) {
+-        ext_mem_alloc_type(0x100000, MEMMAP_EFI_RECLAIMABLE);
+-    }
+-
+     memcpy(untouched_memmap, memmap, memmap_entries * sizeof(struct memmap_entry));
+     untouched_memmap_entries = memmap_entries;
+ 
+@@ -531,6 +552,14 @@ void init_memmap(void) {
+         pmm_claim_uefi_pages(base, untouched_memmap[i].length / PAGE_SIZE);
+     }
+ 
++    // Hand the reserve back to EFI; our map keeps it EFI reclaimable.
++    for (size_t i = 0; i < reserve_count; i++) {
++        status = gBS->FreePages(firmware_reserve[i], 0x100000 / PAGE_SIZE);
++        if (status) {
++            panic(false, "pmm: Failure returning firmware reserve");
++        }
++    }
++
+     memcpy(untouched_memmap, memmap, memmap_entries * sizeof(struct memmap_entry));
+     untouched_memmap_entries = memmap_entries;
+ 
+@@ -546,6 +575,10 @@ void init_memmap(void) {
+ 
+     return;
+ 
++release_reserve:
++    while (reserve_count != 0) {
++        gBS->FreePages(firmware_reserve[--reserve_count], 0x100000 / PAGE_SIZE);
++    }
+ fail:
+     panic(false, "pmm: Failure initialising memory map");
+ }

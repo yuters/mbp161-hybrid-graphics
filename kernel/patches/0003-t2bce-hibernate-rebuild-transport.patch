@@ -1,0 +1,865 @@
+Subject: [PATCH] staging: t2bce: rebuild the BCE transport across hibernation
+
+The image-loading kernel probes t2bce (the LUKS prompt needs the internal
+keyboard) and signs on to bridgeOS with SET_FW_PROTOCOL_VERSION (0x0c).
+Decoded bridgeOS 23P6068 firmware: a sign-on destroys every queue of the
+host owner, and the saved-state nonce is written only by the serializer, so
+RESTORE_STATE_AND_WAKE after a Linux loader takes the equal-nonce fast path
+and deserializes nothing. The restored kernel then drove queue ids and DMA
+addresses bridgeOS no longer had, while the loader's queues could still DMA
+into restored memory (iommu=pt). No saved state can be carried across S4.
+
+core: freeze/thaw quiesce without a firmware sleep handshake; poweroff keeps
+the stateful suspend path. restore signs on again (dropping the loader's
+queues), resets the command CQ/SQ rings and re-registers them.
+vhci: PM notifier. PM_HIBERNATION_PREPARE / PM_RESTORE_PREPARE remove the
+HCD (all transfer queues) and destroy event/message queues while firmware
+and usbcore are running; PM_POST_* rebuild them with a fresh HCD. Queue
+destroy now unregisters before freeing DMA buffers.
+audio: same notifier, unbind/rebind the device. remove() follows the
+hot-unplug model (snd_card_disconnect, then free when closed) so it never
+waits for userspace: systemd-sleep has frozen PipeWire by then. remove()
+also destroys its BCE queues, which were leaked with receive buffers posted
+and a completion callback into the module, and drains a private message
+workqueue.
+
+S3 is unchanged. Tested on 7.2.6-arch2-Watanare-T2-2-t2 (core 07CBD5DD,
+vhci D08F6634, audio 50ABF997): 5/5 real S4 restores, 3 of them plain
+systemctl hibernate from the daily setup. See docs/HIBERNATION.md.
+
+diff -ruN a/drivers/staging/t2bce/t2bce_audio/audio.c b/drivers/staging/t2bce/t2bce_audio/audio.c
+--- a/drivers/staging/t2bce/t2bce_audio/audio.c
++++ b/drivers/staging/t2bce/t2bce_audio/audio.c
+@@ -12,6 +12,7 @@
+ #include <linux/version.h>
+ #include <linux/debugfs.h>
+ #include <linux/uaccess.h>
++#include <linux/suspend.h>
+ 
+ static int t2audio_alsa_index = SNDRV_DEFAULT_IDX1;
+ static char *t2audio_alsa_id = SNDRV_DEFAULT_STR1;
+@@ -19,6 +20,11 @@
+ static dev_t t2audio_chrdev;
+ static struct class *t2audio_class;
+ 
++/* Bound device, and the one unbound for a hibernation cycle; see t2audio_pm_notify(). */
++static DEFINE_MUTEX(t2audio_pm_lock);
++static struct pci_dev *t2audio_bound_pdev;
++static struct pci_dev *t2audio_detached_pdev;
++
+ static int t2audio_init_cmd(struct t2audio_device *a);
+ static int t2audio_init_bs(struct t2audio_device *a);
+ static void t2audio_init_dev(struct t2audio_device *a, t2audio_device_id_t dev_id);
+@@ -28,6 +34,8 @@
+ static void t2audio_resume_work(struct work_struct *ws);
+ static void t2audio_resume_complete(void *userdata);
+ static int t2audio_pm_prepare_client(void *userdata);
++static int t2audio_quiesce(struct t2audio_device *t2audio, bool suspend_pcm);
++static void t2audio_card_free(struct snd_card *card);
+ static void t2audio_pm_shutdown_client(void *userdata);
+ static int t2audio_debugfs_init(struct t2audio_device *a);
+ 
+@@ -101,6 +109,12 @@
+         goto fail;
+     }
+ 
++    t2audio->msg_wq = alloc_workqueue("t2bce_audio_msg", WQ_UNBOUND, 1);
++    if (!t2audio->msg_wq) {
++        status = -ENOMEM;
++        goto fail;
++    }
++
+     if (t2audio_bce_init(t2audio)) {
+         dev_warn(&dev->dev, "t2bce_audio: Failed to init BCE command transport\n");
+         goto fail;
+@@ -142,6 +156,10 @@
+         dev_err(&dev->dev, "t2bce_audio: Failed to register ALSA sound device\n");
+         goto fail_snd;
+     }
++    /* From here the card owns the teardown of what its callbacks can reach. */
++    t2audio->card->private_data = t2audio;
++    t2audio->card->private_free = t2audio_card_free;
++    pci_dev_get(dev);
+ 
+     list_for_each_entry(sdev, &t2audio->subdevice_list, list) {
+         struct t2audio_buffer_struct_device *dev = &t2audio->bs->devices[sdev->buf_id];
+@@ -153,6 +171,10 @@
+         }
+     }
+ 
++    mutex_lock(&t2audio_pm_lock);
++    t2audio_bound_pdev = dev;
++    mutex_unlock(&t2audio_pm_lock);
++
+     pr_info("t2bce_audio: device initialized\n");
+     return 0;
+ 
+@@ -168,6 +190,10 @@
+     }
+ fail:
+     if (t2audio) {
++        if (!IS_ERR_OR_NULL(t2audio->bce))
++            t2audio_bce_destroy(t2audio);
++        if (t2audio->msg_wq)
++            destroy_workqueue(t2audio->msg_wq);
+         if (t2audio->dev)
+             device_destroy(t2audio_class, t2audio->devt);
+         if (!IS_ERR_OR_NULL(t2audio->reg_mem_bs))
+@@ -190,29 +216,63 @@
+ 
+ 
+ 
+-static void t2audio_remove(struct pci_dev *dev)
++/*
++ * Runs when the last user of the card has closed it, which may be long after
++ * remove(): ALSA can still call close/hw_free on a disconnected card, and those
++ * reach the subdevices and the BufferStruct mapping.
++ */
++static void t2audio_card_free(struct snd_card *card)
+ {
++    struct t2audio_device *t2audio = card->private_data;
+     struct t2audio_subdevice *sdev;
+-    struct t2audio_device *t2audio = pci_get_drvdata(dev);
+ 
+-    cancel_work_sync(&t2audio->resume_work);
+-    debugfs_remove_recursive(t2audio->debugfs_dir);
+-    t2audio->debugfs_dir = NULL;
+-    snd_card_free(t2audio->card);
+     while (!list_empty(&t2audio->subdevice_list)) {
+         sdev = list_first_entry(&t2audio->subdevice_list, struct t2audio_subdevice, list);
+         list_del(&sdev->list);
+         t2audio_free_dev(sdev);
+     }
+-    pci_iounmap(dev, t2audio->reg_mem_bs);
+-    pci_iounmap(dev, t2audio->reg_mem_cfg);
++    pci_iounmap(t2audio->pci, t2audio->reg_mem_bs);
++    pci_iounmap(t2audio->pci, t2audio->reg_mem_cfg);
++    pci_dev_put(t2audio->pci);
++    kfree(t2audio);
++}
++
++/*
++ * Hot-unplug model, as snd-usb-audio does it: remove() must not wait for
++ * applications to close the card. It is also called from the hibernation PM
++ * notifier, after systemd-sleep has frozen user.slice; a frozen PipeWire
++ * cannot close anything, so snd_card_free() there would never return.
++ */
++static void t2audio_remove(struct pci_dev *dev)
++{
++    struct t2audio_device *t2audio = pci_get_drvdata(dev);
++
++    mutex_lock(&t2audio_pm_lock);
++    if (t2audio_bound_pdev == dev)
++        t2audio_bound_pdev = NULL;
++    mutex_unlock(&t2audio_pm_lock);
++
++    /* Stop IO and revoke remote access while the transport still exists. */
++    t2audio_quiesce(t2audio, false);
++    cancel_work_sync(&t2audio->resume_work);
++    debugfs_remove_recursive(t2audio->debugfs_dir);
++    t2audio->debugfs_dir = NULL;
++    /* Stops running streams and fails further file operations; no wait for close. */
++    snd_card_disconnect(t2audio->card);
++    /* Previously leaked: registered queues with receive buffers posted. */
++    t2audio_bce_destroy(t2audio);
++    destroy_workqueue(t2audio->msg_wq);
++    t2audio->msg_wq = NULL;
+     device_destroy(t2audio_class, t2audio->devt);
++    t2bce_core_client_set_resume_complete_callback(t2audio->bce, NULL, NULL);
++    t2bce_core_client_set_pm_ops(t2audio->bce, NULL, NULL);
++    t2bce_core_client_put(t2audio->bce);
++    t2audio->bce = NULL;
+     pci_free_irq_vectors(dev);
+     pci_release_regions(dev);
+     pci_disable_device(dev);
+-    t2bce_core_client_set_pm_ops(t2audio->bce, NULL, NULL);
+-    t2bce_core_client_put(t2audio->bce);
+-    kfree(t2audio);
++    pci_set_drvdata(dev, NULL);
++    snd_card_free_when_closed(t2audio->card);
+ }
+ 
+ static int t2audio_quiesce(struct t2audio_device *t2audio, bool suspend_pcm)
+@@ -866,10 +926,13 @@
+      * is not possible when we are in the reply parsing code's context. */
+     struct t2audio_prop_change_work_struct *work;
+     work = kmalloc(sizeof(struct t2audio_prop_change_work_struct), GFP_KERNEL);
++    if (!work)
++        return;
+     work->a = a;
+     INIT_WORK(&work->ws, t2audio_handle_prop_change_work);
+     t2audio_msg_read_property_changed(msg, &work->dev, &work->obj, &work->prop);
+-    schedule_work(&work->ws);
++    /* Same queue as message handling, so teardown drains it. */
++    queue_work(a->msg_wq, &work->ws);
+ }
+ 
+ #define t2audio_send_cmd_response(a, sctx, msg, fn, ...) \
+@@ -932,6 +995,52 @@
+ };
+ 
+ 
++/*
++ * Hibernation cannot carry bridgeOS state across: the image-loading kernel's
++ * sign-on destroys every queue this kernel registered (see t2bce_restore()).
++ * Unbind before the transition, which releases the firmware queues while
++ * everything still runs, and probe again afterwards on the rebuilt transport.
++ */
++static int t2audio_pm_notify(struct notifier_block *nb, unsigned long action, void *data)
++{
++    struct pci_dev *pdev;
++    int ret;
++
++    mutex_lock(&t2audio_pm_lock);
++    switch (action) {
++    case PM_HIBERNATION_PREPARE:
++    case PM_RESTORE_PREPARE:
++        pdev = t2audio_bound_pdev;
++        if (!pdev || t2audio_detached_pdev)
++            break;
++        pci_dev_get(pdev);
++        t2audio_detached_pdev = pdev;
++        mutex_unlock(&t2audio_pm_lock);
++        pr_info("t2bce_audio: detach for hibernation\n");
++        device_release_driver(&pdev->dev);
++        pr_info("t2bce_audio: detach done\n");
++        return NOTIFY_DONE;
++    case PM_POST_HIBERNATION:
++    case PM_POST_RESTORE:
++        pdev = t2audio_detached_pdev;
++        if (!pdev)
++            break;
++        t2audio_detached_pdev = NULL;
++        mutex_unlock(&t2audio_pm_lock);
++        ret = device_attach(&pdev->dev);
++        pr_info("t2bce_audio: attach after hibernation: %s (%d)\n",
++                ret == 1 ? "bound" : "not bound", ret);
++        pci_dev_put(pdev);
++        return NOTIFY_DONE;
++    }
++    mutex_unlock(&t2audio_pm_lock);
++    return NOTIFY_DONE;
++}
++
++static struct notifier_block t2audio_pm_nb = {
++        .notifier_call = t2audio_pm_notify,
++};
++
+ static int __init t2audio_module_init(void)
+ {
+     int result;
+@@ -950,6 +1059,7 @@
+     result = pci_register_driver(&t2audio_pci_driver);
+     if (result)
+         goto fail_drv;
++    register_pm_notifier(&t2audio_pm_nb);
+     pr_info("t2bce_audio: module initialized\n");
+     return 0;
+ 
+@@ -967,6 +1077,13 @@
+ 
+ static void __exit t2audio_module_exit(void)
+ {
++    unregister_pm_notifier(&t2audio_pm_nb);
++    mutex_lock(&t2audio_pm_lock);
++    if (t2audio_detached_pdev) {
++        pci_dev_put(t2audio_detached_pdev);
++        t2audio_detached_pdev = NULL;
++    }
++    mutex_unlock(&t2audio_pm_lock);
+     pci_unregister_driver(&t2audio_pci_driver);
+     class_destroy(t2audio_class);
+     unregister_chrdev_region(t2audio_chrdev, 1);
+diff -ruN a/drivers/staging/t2bce/t2bce_audio/audio.h b/drivers/staging/t2bce/t2bce_audio/audio.h
+--- a/drivers/staging/t2bce/t2bce_audio/audio.h
++++ b/drivers/staging/t2bce/t2bce_audio/audio.h
+@@ -144,6 +144,7 @@
+     struct work_struct resume_work;
+     bool resume_deferred;
+     bool pm_quiesced;
++    struct workqueue_struct *msg_wq;
+ 
+ };
+ 
+diff -ruN a/drivers/staging/t2bce/t2bce_audio/protocol_bce.c b/drivers/staging/t2bce/t2bce_audio/protocol_bce.c
+--- a/drivers/staging/t2bce/t2bce_audio/protocol_bce.c
++++ b/drivers/staging/t2bce/t2bce_audio/protocol_bce.c
+@@ -30,6 +30,45 @@
+     return 0;
+ }
+ 
++static void t2audio_bce_queue_destroy(struct t2audio_device *dev, struct t2audio_bce_queue *q)
++{
++    if (!q->sq)
++        return;
++    /* Unregister first: bridgeOS may still own posted receive buffers. */
++    t2bce_core_destroy_sq(dev->bce, q->sq);
++    q->sq = NULL;
++}
++
++/*
++ * Release every queue bridgeOS holds for this device. Once the SQs are
++ * unregistered no new completion can target them; wait out a completion
++ * handler that is already running before freeing the buffers it reads.
++ */
++void t2audio_bce_destroy(struct t2audio_device *dev)
++{
++    struct t2audio_bce *b = &dev->bcem;
++    struct t2audio_bce_queue *queues[] = { &b->qin, &b->qout };
++    int i;
++
++    for (i = 0; i < ARRAY_SIZE(queues); i++)
++        t2audio_bce_queue_destroy(dev, queues[i]);
++    t2bce_core_synchronize_completions(dev->bce);
++    for (i = 0; i < ARRAY_SIZE(queues); i++) {
++        if (!queues[i]->data)
++            continue;
++        dma_free_coherent(t2bce_core_client_dma_dev(dev->bce),
++                queues[i]->el_size * queues[i]->el_count,
++                queues[i]->data, queues[i]->dma_addr);
++        queues[i]->data = NULL;
++    }
++    if (b->cq) {
++        t2bce_core_destroy_cq(dev->bce, b->cq);
++        b->cq = NULL;
++    }
++    if (dev->msg_wq)
++        drain_workqueue(dev->msg_wq);
++}
++
+ int t2audio_bce_queue_init(struct t2audio_device *dev, struct t2audio_bce_queue *q, const char *name,
+         enum dma_data_direction direction, t2bce_core_sq_completion cfn)
+ {
+@@ -65,6 +104,9 @@
+     size_t index;
+     void *dptr;
+     struct t2audio_msg_header *header;
++    /* Transport already released by remove(); see t2audio_bce_destroy(). */
++    if (!b->qout.sq)
++        return -ENODEV;
+     if ((status = t2bce_core_reserve_submission(b->qout.sq, &ctx->timeout)))
+         return status;
+     spin_lock_irqsave(&b->spinlock, ctx->irq_flags);
+@@ -229,7 +271,8 @@
+     work->a = a;
+     work->msg.size = msg->size;
+     INIT_WORK(&work->ws, t2audio_deferred_msg_work);
+-    schedule_work(&work->ws);
++    /* Own queue, so teardown can drain handlers that still reference @a. */
++    queue_work(a->msg_wq, &work->ws);
+ }
+ 
+ void t2audio_bce_in_queue_submit_pending(struct t2audio_bce_queue *q, size_t count)
+diff -ruN a/drivers/staging/t2bce/t2bce_audio/protocol_bce.h b/drivers/staging/t2bce/t2bce_audio/protocol_bce.h
+--- a/drivers/staging/t2bce/t2bce_audio/protocol_bce.h
++++ b/drivers/staging/t2bce/t2bce_audio/protocol_bce.h
+@@ -41,6 +41,7 @@
+ };
+ 
+ int t2audio_bce_init(struct t2audio_device *dev);
++void t2audio_bce_destroy(struct t2audio_device *dev);
+ int __t2audio_send_prepare(struct t2audio_bce *b, struct t2audio_send_ctx *ctx, char *tag);
+ void __t2audio_send(struct t2audio_bce *b, struct t2audio_send_ctx *ctx);
+ int __t2audio_send_cmd_sync(struct t2audio_bce *b, struct t2audio_send_ctx *ctx, struct t2audio_msg *reply);
+diff -ruN a/drivers/staging/t2bce/t2bce_core/t2bce_main.c b/drivers/staging/t2bce/t2bce_core/t2bce_main.c
+--- a/drivers/staging/t2bce/t2bce_core/t2bce_main.c
++++ b/drivers/staging/t2bce/t2bce_core/t2bce_main.c
+@@ -229,12 +229,65 @@
+     return status;
+ }
+ 
+-static int bce_create_command_queues(struct t2bce_device *bce)
++static int bce_register_command_queues(struct t2bce_device *bce)
+ {
+     int status;
+     struct bce_queue_memcfg *cfg;
+     struct t2bce_dma_engine *dma = &bce->dma;
+ 
++    /* The registration payload is DMA-mapped, so it must not live on the stack. */
++    cfg = kzalloc(sizeof(struct bce_queue_memcfg), GFP_KERNEL);
++    if (!cfg)
++        return -ENOMEM;
++    t2bce_dma_get_cq_memcfg(dma->cmd_cq, cfg);
++    status = bce_register_command_queue(bce, cfg, false);
++    if (!status) {
++        t2bce_dma_get_sq_memcfg(dma->cmd_cmdq->sq, dma->cmd_cq, cfg);
++        status = bce_register_command_queue(bce, cfg, true);
++    }
++    kfree(cfg);
++    return status;
++}
++
++/*
++ * A fresh sign-on makes bridgeOS drop every queue this host owner had, so the
++ * firmware side of the command queues restarts at index 0. Bring the host ring
++ * state back to the same point before registering them again. Clients are
++ * quiesced, so no command is in flight.
++ */
++static void bce_reset_command_queues(struct t2bce_device *bce)
++{
++    struct t2bce_dma_engine *dma = &bce->dma;
++    struct bce_queue_cq *cq = dma->cmd_cq;
++    struct bce_queue_cmdq *cmdq = dma->cmd_cmdq;
++    struct bce_queue_sq *sq = cmdq->sq;
++    u32 i;
++
++    spin_lock(&dma->queues_lock);
++    memset(cq->data, 0, cq->el_count * sizeof(struct bce_qe_completion));
++    cq->index = 0;
++    spin_unlock(&dma->queues_lock);
++
++    spin_lock(&cmdq->lck);
++    for (i = 0; i < sq->el_count; i++) {
++        cmdq->tres[i] = NULL;
++        cmdq->slot_gen[i]++;
++    }
++    sq->head = 0;
++    sq->tail = 0;
++    sq->completion_cidx = 0;
++    sq->completion_tail = 0;
++    sq->has_pending_completions = false;
++    memset(sq->completion_data, 0, sizeof(*sq->completion_data) * sq->el_count);
++    atomic_set(&sq->available_commands, sq->el_count - 1);
++    spin_unlock(&cmdq->lck);
++}
++
++static int bce_create_command_queues(struct t2bce_device *bce)
++{
++    int status;
++    struct t2bce_dma_engine *dma = &bce->dma;
++
+     dma->cmd_cq = t2bce_dma_alloc_cq(dma, 0, 0x20);
+     dma->cmd_cmdq = t2bce_dma_alloc_cmdq(dma, 1, 0x20);
+     if (dma->cmd_cq == NULL || dma->cmd_cmdq == NULL) {
+@@ -244,18 +297,8 @@
+     dma->queues[0] = (struct bce_queue *) dma->cmd_cq;
+     dma->queues[1] = (struct bce_queue *) dma->cmd_cmdq->sq;
+ 
+-    cfg = kzalloc(sizeof(struct bce_queue_memcfg), GFP_KERNEL);
+-    if (!cfg) {
+-        status = -ENOMEM;
+-        goto err;
+-    }
+-    t2bce_dma_get_cq_memcfg(dma->cmd_cq, cfg);
+-    if ((status = bce_register_command_queue(bce, cfg, false)))
+-        goto err;
+-    t2bce_dma_get_sq_memcfg(dma->cmd_cmdq->sq, dma->cmd_cq, cfg);
+-    if ((status = bce_register_command_queue(bce, cfg, true)))
++    if ((status = bce_register_command_queues(bce)))
+         goto err;
+-    kfree(cfg);
+ 
+     return 0;
+ 
+@@ -672,6 +715,103 @@
+     return status;
+ }
+ 
++static int t2bce_freeze(struct device *dev)
++{
++    struct t2bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
++    int status;
++
++    /*
++     * Freeze quiesces only; it must not tell bridgeOS to sleep. The system
++     * keeps running afterwards: the writer still has an image to write, and
++     * the image-loading kernel freezes again before handing over. The T2 is
++     * the power controller here, so a sleep handshake from a running host
++     * takes the machine down.
++     *
++     * Clients have already released their firmware queues from their
++     * hibernation PM notifiers, so only the command queues remain
++     * registered, with nothing posted for bridgeOS to write into.
++     */
++    pr_info("t2bce_core: freeze: entry\n");
++    mutex_lock(&bce->pm_lock);
++
++    bce->stateful_suspend_valid = false;
++    bce->no_state_fallback = false;
++    bce->no_state_resume = false;
++    t2bce_core_clients_pm_reset(bce);
++    status = t2bce_core_clients_pm_prepare(bce);
++    if (!status)
++        status = bce_pm_suspend_prepare(bce);
++    if (status)
++        bce_pm_suspend_abort(bce);
++
++    mutex_unlock(&bce->pm_lock);
++    pr_info("t2bce_core: freeze: exit status=%d\n", status);
++    return status;
++}
++
++static int t2bce_thaw(struct device *dev)
++{
++    struct t2bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
++
++    /* Undo the freeze quiesce. No wake handshake: nothing was put to sleep. */
++    pr_info("t2bce_core: thaw: entry\n");
++    mutex_lock(&bce->pm_lock);
++
++    pci_set_master(bce->pci);
++    pci_set_master(bce->pci0);
++    bce_pm_resume_finish(bce);
++
++    mutex_unlock(&bce->pm_lock);
++    pr_info("t2bce_core: thaw: exit\n");
++    return 0;
++}
++
++static int t2bce_restore(struct device *dev)
++{
++    struct t2bce_device *bce = pci_get_drvdata(to_pci_dev(dev));
++    int status;
++
++    /*
++     * No saved firmware state can be restored here. The image-loading
++     * kernel signed on after this image was written, and a sign-on makes
++     * bridgeOS destroy every queue of the host owner, so the writer's
++     * queues are gone and only the loader's command queues remain.
++     * Stateful wake would then take bridgeOS's matching-nonce fast path
++     * and deserialize nothing. Sign on again, which drops the loader's
++     * queues, and register ours from a clean ring. Clients released their
++     * queues before the snapshot and rebuild them after thaw.
++     */
++    pr_info("t2bce_core: hibernate restore: re-sign-on\n");
++    mutex_lock(&bce->pm_lock);
++
++    bce->stateful_suspend_valid = false;
++    bce->no_state_fallback = false;
++    bce->no_state_resume = false;
++
++    pci_set_master(bce->pci);
++    pci_set_master(bce->pci0);
++
++    /* A new sign-on, as at probe: the XHCI PM doorbell comes first. */
++    bce_xhci_pm_start(&bce->xhci_pm, true);
++    bce_pm_channel_resume(bce);
++
++    status = bce_fw_version_handshake(bce);
++    if (status) {
++        pr_err("t2bce_core: hibernate restore: sign-on failed: %d\n", status);
++        goto out_unlock;
++    }
++    bce_reset_command_queues(bce);
++    status = bce_register_command_queues(bce);
++    if (status)
++        pr_err("t2bce_core: hibernate restore: command queue registration failed: %d\n", status);
++
++out_unlock:
++    mutex_unlock(&bce->pm_lock);
++    pr_info("t2bce_core: hibernate restore: exit status=%d fw_version=%x\n",
++            status, bce->fw_version);
++    return status;
++}
++
+ static int t2bce_prepare(struct device *dev)
+ {
+     /*
+@@ -709,6 +849,10 @@
+         .prepare = t2bce_prepare,
+         .suspend = t2bce_suspend,
+         .resume = t2bce_resume,
++        .freeze = t2bce_freeze,
++        .thaw = t2bce_thaw,
++        .poweroff = t2bce_suspend,
++        .restore = t2bce_restore,
+         .complete = t2bce_complete
+ };
+ struct pci_driver t2bce_pci_driver = {
+diff -ruN a/drivers/staging/t2bce/t2bce_vhci/queue.c b/drivers/staging/t2bce/t2bce_vhci/queue.c
+--- a/drivers/staging/t2bce/t2bce_vhci/queue.c
++++ b/drivers/staging/t2bce/t2bce_vhci/queue.c
+@@ -40,11 +40,16 @@
+ {
+     if (!q->cq)
+         return;
++    /* Unregister before freeing: bridgeOS must not target freed memory. */
++    t2bce_core_destroy_sq(vhci->client, q->sq);
++    t2bce_core_destroy_cq(vhci->client, q->cq);
++    t2bce_core_synchronize_completions(vhci->client);
+     dma_free_coherent(t2bce_core_client_dma_dev(vhci->client),
+                       sizeof(struct bce_vhci_message) * VHCI_EVENT_QUEUE_EL_COUNT,
+                       q->data, q->dma_addr);
+-    t2bce_core_destroy_sq(vhci->client, q->sq);
+-    t2bce_core_destroy_cq(vhci->client, q->cq);
++    q->data = NULL;
++    q->sq = NULL;
++    q->cq = NULL;
+ }
+ 
+ void bce_vhci_message_queue_write(struct bce_vhci_message_queue *q, struct bce_vhci_message *req)
+@@ -101,10 +106,14 @@
+ {
+     if (!q->sq)
+         return;
++    /* Posted event buffers belong to bridgeOS until the queue is unregistered. */
++    t2bce_core_destroy_sq(vhci->client, q->sq);
++    t2bce_core_synchronize_completions(vhci->client);
+     dma_free_coherent(t2bce_core_client_dma_dev(vhci->client),
+                       sizeof(struct bce_vhci_message) * VHCI_EVENT_QUEUE_EL_COUNT,
+                       q->data, q->dma_addr);
+-    t2bce_core_destroy_sq(vhci->client, q->sq);
++    q->data = NULL;
++    q->sq = NULL;
+ }
+ 
+ static void bce_vhci_event_queue_completion(struct t2bce_core_queue_sq *sq)
+diff -ruN a/drivers/staging/t2bce/t2bce_vhci/vhci.c b/drivers/staging/t2bce/t2bce_vhci/vhci.c
+--- a/drivers/staging/t2bce/t2bce_vhci/vhci.c
++++ b/drivers/staging/t2bce/t2bce_vhci/vhci.c
+@@ -6,6 +6,7 @@
+ #include <linux/version.h>
+ #include <linux/err.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ 
+ /*
+  * bridgeOS exposes several T2-internal devices through a virtual USB 2.0 hub.
+@@ -36,6 +37,7 @@
+ static void bce_vhci_destroy_message_queues(struct bce_vhci *vhci);
+ static void bce_vhci_handle_firmware_events_w(struct work_struct *ws);
+ static void bce_vhci_add_hcd_w(struct work_struct *ws);
++static int bce_vhci_pm_notify(struct notifier_block *nb, unsigned long action, void *data);
+ static void bce_vhci_firmware_event_completion(struct t2bce_core_queue_sq *sq);
+ static int bce_vhci_start_controller(struct bce_vhci *vhci);
+ static int __bce_vhci_add_hcd(struct bce_vhci *vhci);
+@@ -57,6 +59,29 @@
+         .pm_complete = bce_vhci_pm_complete_client,
+ };
+ 
++static struct usb_hcd *bce_vhci_alloc_hcd(struct bce_vhci *vhci)
++{
++    struct usb_hcd *hcd;
++
++    hcd = usb_create_hcd(&bce_vhci_driver, vhci->vdev, "t2bce_vhci");
++    if (!hcd)
++        return NULL;
++    hcd->self.sysdev = t2bce_core_client_dma_dev(vhci->client);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
++    hcd->self.uses_dma = 1;
++#endif
++    /*
++     * The HCD accepts arbitrary Linux scatterlists and splits them into the
++     * 32-element descriptor blocks supported by bridgeOS.  Segment boundaries
++     * do not have to match USB max-packet boundaries.
++     */
++    hcd->self.sg_tablesize = ~0U;
++    hcd->self.no_sg_constraint = 1;
++    *((struct bce_vhci **) hcd->hcd_priv) = vhci;
++    hcd->speed = HCD_USB2;
++    return hcd;
++}
++
+ int bce_vhci_create(struct device *parent, struct bce_vhci *vhci)
+ {
+     int status;
+@@ -88,28 +113,19 @@
+     vhci->port_change_pending = 0;
+     vhci->system_suspending = false;
+ 
+-    vhci->hcd = usb_create_hcd(&bce_vhci_driver, vhci->vdev, "t2bce_vhci");
++    vhci->hcd = bce_vhci_alloc_hcd(vhci);
+     if (!vhci->hcd) {
+         status = -ENOMEM;
+         goto fail_hcd;
+     }
+-    vhci->hcd->self.sysdev = t2bce_core_client_dma_dev(vhci->client);
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
+-    vhci->hcd->self.uses_dma = 1;
+-#endif
+-    /*
+-     * The HCD accepts arbitrary Linux scatterlists and splits them into the
+-     * 32-element descriptor blocks supported by bridgeOS.  Segment boundaries
+-     * do not have to match USB max-packet boundaries.
+-     */
+-    vhci->hcd->self.sg_tablesize = ~0U;
+-    vhci->hcd->self.no_sg_constraint = 1;
+-    *((struct bce_vhci **) vhci->hcd->hcd_priv) = vhci;
+-    vhci->hcd->speed = HCD_USB2;
+ 
+     if ((status = __bce_vhci_add_hcd(vhci)))
+         goto fail_hcd;
+ 
++    vhci->detached = false;
++    vhci->pm_nb.notifier_call = bce_vhci_pm_notify;
++    register_pm_notifier(&vhci->pm_nb);
++
+     pr_info("t2bce_vhci: device initialized\n");
+     return 0;
+ 
+@@ -131,10 +147,13 @@
+ 
+ void bce_vhci_destroy(struct bce_vhci *vhci)
+ {
++    unregister_pm_notifier(&vhci->pm_nb);
+     cancel_work_sync(&vhci->w_add_hcd);
+-    bce_vhci_remove_hcd(vhci);
+-    bce_vhci_destroy_event_queues(vhci);
+-    bce_vhci_destroy_message_queues(vhci);
++    if (!vhci->detached) {
++        bce_vhci_remove_hcd(vhci);
++        bce_vhci_destroy_event_queues(vhci);
++        bce_vhci_destroy_message_queues(vhci);
++    }
+     t2bce_core_client_set_pm_ops(vhci->client, NULL, NULL);
+     t2bce_core_client_put(vhci->client);
+     vhci->client = NULL;
+@@ -167,8 +186,101 @@
+     vhci->hcd_registered = false;
+ }
+ 
++/*
++ * Hibernation cannot carry bridgeOS state across. The image-loading kernel
++ * signs on as the same host owner, which destroys every queue this kernel had
++ * registered (see t2bce_restore()). Release everything bridgeOS holds for this
++ * HCD while the firmware and usbcore are both fully running, and build it again
++ * from scratch afterwards, as native macOS does after a controller identity
++ * change. Posted event and transfer buffers are DMA targets; none may survive
++ * into the snapshot or into the image-loading kernel's memory handoff.
++ */
++static void bce_vhci_detach(struct bce_vhci *vhci, const char *reason)
++{
++    if (vhci->detached)
++        return;
++
++    pr_info("t2bce_vhci: detach for %s: entry\n", reason);
++    cancel_work_sync(&vhci->w_add_hcd);
++    /* Stops the controller and destroys all device transfer queues. */
++    bce_vhci_remove_hcd(vhci);
++    usb_put_hcd(vhci->hcd);
++    vhci->hcd = NULL;
++    flush_workqueue(vhci->tq_state_wq);
++    bce_vhci_destroy_event_queues(vhci);
++    bce_vhci_destroy_message_queues(vhci);
++    vhci->port_change_pending = 0;
++    WRITE_ONCE(vhci->system_suspending, false);
++    vhci->no_state_resume = false;
++    vhci->detached = true;
++    pr_info("t2bce_vhci: detach for %s: exit\n", reason);
++}
++
++static int bce_vhci_attach(struct bce_vhci *vhci, const char *reason)
++{
++    int status;
++
++    if (!vhci->detached)
++        return 0;
++
++    pr_info("t2bce_vhci: attach after %s: entry\n", reason);
++    if ((status = bce_vhci_create_message_queues(vhci)))
++        goto fail;
++    if ((status = bce_vhci_create_event_queues(vhci)))
++        goto fail_mq;
++    vhci->hcd = bce_vhci_alloc_hcd(vhci);
++    if (!vhci->hcd) {
++        status = -ENOMEM;
++        goto fail_eq;
++    }
++    if ((status = __bce_vhci_add_hcd(vhci))) {
++        usb_put_hcd(vhci->hcd);
++        vhci->hcd = NULL;
++        goto fail_eq;
++    }
++    vhci->detached = false;
++    pr_info("t2bce_vhci: attach after %s: exit status=0\n", reason);
++    return 0;
++
++fail_eq:
++    bce_vhci_destroy_event_queues(vhci);
++fail_mq:
++    bce_vhci_destroy_message_queues(vhci);
++fail:
++    pr_err("t2bce_vhci: attach after %s failed: %d\n", reason, status);
++    return status;
++}
++
++static int bce_vhci_pm_notify(struct notifier_block *nb, unsigned long action, void *data)
++{
++    struct bce_vhci *vhci = container_of(nb, struct bce_vhci, pm_nb);
++
++    /*
++     * These run before tasks are frozen and after they are thawed, in the
++     * writer (hibernation) and in the image-loading kernel (restore). The
++     * restored kernel continues from the writer's PM_POST_HIBERNATION.
++     */
++    switch (action) {
++    case PM_HIBERNATION_PREPARE:
++        bce_vhci_detach(vhci, "hibernation");
++        break;
++    case PM_RESTORE_PREPARE:
++        bce_vhci_detach(vhci, "image restore");
++        break;
++    case PM_POST_HIBERNATION:
++        bce_vhci_attach(vhci, "hibernation");
++        break;
++    case PM_POST_RESTORE:
++        bce_vhci_attach(vhci, "failed image restore");
++        break;
++    }
++    return NOTIFY_DONE;
++}
++
+ void bce_vhci_shutdown(struct bce_vhci *vhci)
+ {
++    if (vhci->detached)
++        return;
+     cancel_work_sync(&vhci->w_add_hcd);
+     if (vhci->hcd_registered) {
+         bce_vhci_remove_hcd(vhci);
+@@ -231,6 +343,8 @@
+ {
+     int status;
+ 
++    if (vhci->detached)
++        return 0;
+     cancel_work_sync(&vhci->w_add_hcd);
+     vhci->port_change_pending = 0;
+     flush_workqueue(vhci->tq_state_wq);
+@@ -242,6 +356,8 @@
+ 
+ void bce_vhci_pm_prepare_no_state(struct bce_vhci *vhci)
+ {
++    if (vhci->detached)
++        return;
+     bce_vhci_remove_hcd(vhci);
+ }
+ 
+@@ -257,7 +373,7 @@
+ 
+ void bce_vhci_pm_complete(struct bce_vhci *vhci)
+ {
+-    if (!vhci->no_state_resume)
++    if (vhci->detached || !vhci->no_state_resume)
+         return;
+ 
+     bce_vhci_resume_event_queues(vhci);
+@@ -861,6 +977,7 @@
+     bce_vhci_event_queue_destroy(vhci, &vhci->ev_asynchronous);
+     if (vhci->ev_cq)
+         t2bce_core_destroy_cq(vhci->client, vhci->ev_cq);
++    vhci->ev_cq = NULL;
+ }
+ 
+ static void bce_vhci_send_fw_event_response(struct bce_vhci *vhci, struct bce_vhci_message *req, u16 status)
+diff -ruN a/drivers/staging/t2bce/t2bce_vhci/vhci.h b/drivers/staging/t2bce/t2bce_vhci/vhci.h
+--- a/drivers/staging/t2bce/t2bce_vhci/vhci.h
++++ b/drivers/staging/t2bce/t2bce_vhci/vhci.h
+@@ -4,6 +4,8 @@
+ #include "queue.h"
+ #include "transfer.h"
+ 
++#include <linux/notifier.h>
++
+ struct device;
+ struct usb_hcd;
+ struct t2bce_core_client;
+@@ -43,6 +45,9 @@
+     bool no_state_resume;
+     bool hcd_registered;
+     bool system_suspending;
++    /* Firmware queues and HCD released for hibernation; see bce_vhci_pm_notify(). */
++    bool detached;
++    struct notifier_block pm_nb;
+ };
+ 
+ int __init bce_vhci_module_init(void);
