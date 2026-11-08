@@ -50,16 +50,19 @@ compression stay RGB. No encoding is forced anywhere.
 | 4K@60 | 2 × HBR2, no DSC | YCbCr 4:2:0, 8 bpc | yes |
 | 4K@30 | 2 × HBR2, no DSC | RGB | yes |
 
-Build: 0004 changes `amdgpu` only; build it together with the Falcon patch as
-in [install](INSTALL.md). Tested module `7135E5DE` on
+Build: 0004 changes `amdgpu` only; pass `--with-apple-av-adapter` to
+`tools/build-amdgpu.sh` to build it together with Falcon, as in
+[install](INSTALL.md). The default helper invocation applies only Falcon.
+Tested module `7135E5DE` on
 `7.2.6-arch2-Watanare-T2-2-t2`.
 
 ## Not covered
 
 - macOS uses 10-bit 4:2:0; here the compositor requests 8 bpc.
 - Other Apple adapters (other device ids or firmware) and other displays.
-- Hibernation with this module has not been re-run separately; the change
-  only affects link-capability parsing for this adapter.
+- Hibernation run 7 used this module successfully (see
+  [hibernation validation](HIBERNATION.md#validation)); adapter hotplug and
+  external-display recovery across S4 were not separately established.
 
 ## Testing pitfall
 

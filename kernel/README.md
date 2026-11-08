@@ -1,15 +1,27 @@
 # Active kernel patches
 
-Four independent patches against the packaged Watanare T2 kernel. 0001
-and 0002 were written against 7.2.4 and apply unchanged to 7.2.6; 0003 and
-0004 are against 7.2.6. No whole-kernel rebuild is required.
+Five patches against the packaged Watanare T2 kernel. The current build
+target is `7.2.11-arch1-Watanare-T2-1-t2`, selected by `target-release`.
+The installed selection is **0001, 0002 and 0004**. These apply without
+fuzz and their modules compile against the exact 7.2.11 headers. The normal
+Omarchy boot image and first boot have been verified, with user-confirmed
+display, keyboard, trackpad and speaker audio. Two deep-sleep cycles completed;
+unlock, input and speaker audio were confirmed after the latest wake.
+See the [7.2.11 migration](../docs/KERNEL-7.2.11.md).
+
+0003 and 0005 remain experimental and are excluded. Their earlier build
+results on 7.2.8 do not validate them on 7.2.11. Hibernation remains disabled
+because the BCE S4 teardown issue is unresolved. The historical
+[hybrid candidate](../docs/HYBRID.md) is separate from the installed setup.
+No whole-kernel rebuild is required for the active selection.
 
 | Patch | Module | What it is for |
 |---|---|---|
 | `patches/0001-amdgpu-apple-falcon.patch` | `amdgpu` | Falcon SMC / internal AMD panel |
 | `patches/0002-cdc-ncm-t2-sleep-lifecycle.patch` | `cdc_ncm` | Close T2 NCM data alt before system sleep |
-| `patches/0003-t2bce-hibernate-rebuild-transport.patch` | `t2bce_dma`, `t2bce_core`, `t2bce_vhci`, `t2bce_audio`, `t2bce_ave` | Rebuild the T2 transport across hibernation; queue teardown hardening; audio playback IRQ fix |
+| `patches/0003-t2bce-hibernate-rebuild-transport.patch` | `t2bce_dma`, `t2bce_core`, `t2bce_vhci`, `t2bce_audio`, `t2bce_ave` | Experimental S4 transport reconstruction and queue teardown hardening; retains packaged PCM workqueue implementation |
 | `patches/0004-drm-amd-display-apple-usb-c-av-adapter.patch` | `amdgpu` | 4K@60 through Apple's USB-C AV adapter (no DSC / 4:2:2) |
+| `patches/0005-amdgpu-apple-gmux-runtime-pm.patch` | `amdgpu` + pinned external `t2gmux` | KAIT2EN hybrid/runtime power management, rebased for 7.2.8 |
 
 0003 needs the Limine patch in `../boot/patches/` as well; see
 [hibernation](../docs/HIBERNATION.md).
@@ -69,7 +81,8 @@ reference boot reports use of the VBIOS-provided table.
 ## Removed stack
 
 The earlier gmux-to-Intel, AMD fbdev/eDP suppression and AMD PCI s2idle bypass
-patches are not applied. Their historical code remains in Git history at
+patches are not applied. Patch 0005 now provides a separate KAIT2EN-based
+hybrid candidate. The retired implementation remains in Git history at
 [`e77b03f`](https://github.com/yuters/mbp161-hybrid-graphics/tree/e77b03f).
 Titan Ridge research is kept separately and is **not** an additional patch to
 apply during Falcon validation.

@@ -5,7 +5,27 @@ entry. This procedure builds **only amdgpu**, not a complete kernel. It does
 not use the previous `install.sh`, which installed an incompatible workaround
 stack. Existing users should read [migration](MIGRATION.md) first.
 
-The verified kernel is `7.2.4-arch1-Watanare-T2-1-t2`. Other kernels require
+New builds target `7.2.11-arch1-Watanare-T2-1-t2`, pinned in
+[`kernel/target-release`](../kernel/target-release). The helper uses that
+release even if an older kernel is still running. Historical hardware results
+below are not validation of the new kernel.
+
+The active 7.2.11 selection is 0001 Falcon, 0002 NCM sleep and 0004 Apple AV
+adapter. It uses packaged BCE and GMUX and disables hibernation. Its boot
+image and first boot passed verification; display/input/audio were confirmed
+by the user. Two deep-sleep cycles completed, with normal unlock, input and
+speaker audio confirmed after the latest wake. See the
+[7.2.11 migration](KERNEL-7.2.11.md). The experimental S4 and hybrid patches
+have not been validated for this target.
+
+To build before installing the new kernel, extract its matching headers
+package into a staging directory and set `KERNEL_HEADERS` to its
+`usr/lib/modules/<release>/build` directory when invoking `build-amdgpu.sh`.
+The helper verifies the header release against the requested target.
+
+Falcon was verified on `7.2.4-arch1-Watanare-T2-1-t2` and subsequently used
+on `7.2.6-arch2-Watanare-T2-2-t2`. The Apple AV adapter patch was tested on
+the latter. Other kernels require
 source/ABI review and their own build. Matching the version string alone is
 insufficient: preserve the distro's configuration and T2 patches.
 
@@ -42,10 +62,22 @@ containing clock pins, alternate loaders or suspend bypasses.
 JOBS=6 tools/build-amdgpu.sh /path/to/exact-kernel-source build/falcon-module
 ```
 
+For the Apple USB-C Digital AV Multiport Adapter, include patch 0004 in the
+same module build (see [external display](EXTERNAL-DISPLAY.md)):
+
+```sh
+JOBS=6 tools/build-amdgpu.sh --with-apple-av-adapter \
+    /path/to/exact-kernel-source build/falcon-module
+```
+
 The helper copies GPU sources to the output directory, applies the Falcon
-patch without fuzz, and builds against `/usr/lib/modules/$(uname -r)/build`.
+patch without fuzz, and builds against `/usr/lib/modules/$release/build`,
+where `release` comes from `kernel/target-release` (or the explicit third
+argument).
 It preserves the input tree. Results include `amdgpu.ko`, `build.log` and
 `module-manifest.json`. It does not install anything or sign the module.
+The manifest's `patches` list records every applied patch and its SHA-256;
+the legacy `patch_sha256` field still identifies Falcon alone.
 Use the system's module-signing procedure if signature enforcement is enabled.
 A distro kernel update requires a compatible rebuild; no DKMS integration is
 claimed here.
@@ -64,7 +96,7 @@ entries stock: entries that load modules from that directory would use it too.
 These staging commands assume the usual Omarchy `/usr/lib/modules` layout:
 
 ```sh
-release=$(uname -r)
+release=$(cat kernel/target-release)
 mkdir -p build/module-root/usr/lib/modules
 ln -s usr/lib build/module-root/lib
 cp -a --reflink=auto "/usr/lib/modules/$release" build/module-root/usr/lib/modules/

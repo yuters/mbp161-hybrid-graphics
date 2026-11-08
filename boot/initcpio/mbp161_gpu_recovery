@@ -1,0 +1,37 @@
+#!/usr/bin/ash
+# The install hook MUST add_binary /usr/bin/cmp and /usr/bin/chattr;
+# mkinitcpio's BusyBox does not provide cmp. Test inside the built image.
+# Firmware has already selected this boot's GPU. Restore AMD for later boots
+# before udev or either graphics driver starts. This does not switch live GPUs.
+run_earlyhook() {
+    [ "$(getarg rd.mbp161.restore_discrete)" = 1 ] || return 0
+    local pref=/sys/firmware/efi/efivars/gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9
+    local original=/etc/mbp161-gpu-pref-discrete
+    local integrated=/etc/mbp161-gpu-pref-integrated
+    if [ "$(cat /sys/class/dmi/id/product_name)" != MacBookPro16,1 ]; then
+        err 'MBP161 GPU recovery: unexpected machine; preference unchanged'
+        return 1
+    fi
+    if cmp -s "$pref" "$original"; then
+        return 0
+    fi
+    if ! cmp -s "$pref" "$integrated"; then
+        err 'MBP161 GPU recovery: unexpected preference; refusing to overwrite it'
+        return 1
+    fi
+    if ! chattr -i "$pref"; then
+        err 'MBP161 GPU recovery: could not unlock firmware preference'
+        return 1
+    fi
+    if ! cat "$original" > "$pref"; then
+        chattr +i "$pref"
+        err 'MBP161 GPU recovery: could not restore AMD boot preference'
+        return 1
+    fi
+    chattr +i "$pref" || err 'MBP161 GPU recovery: could not restore immutable flag'
+    if ! cmp -s "$pref" "$original"; then
+        err 'MBP161 GPU recovery: firmware preference readback failed'
+        return 1
+    fi
+    printf '<6>mbp161-gpu-recovery: restored discrete preference for subsequent boots\n' > /dev/kmsg
+}

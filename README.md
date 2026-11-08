@@ -6,6 +6,16 @@ configuration examined here, and memory-clock DPM stays available in `auto`.
 The repository name is retained, but Intel-primary hybrid routing is no longer
 the installation path.
 
+As of November 8, 2026, the reference machine has Omarchy 4.5 and
+**patched T2 7.2.11 installed**, using Falcon, NCM sleep and Apple AV adapter
+fixes in its normal Omarchy boot entry. Build and boot-image verification
+passed. The first 7.2.11 boot loaded the expected drivers and Falcon firmware;
+the user confirmed display, keyboard, trackpad and speaker audio. Two deep-sleep
+cycles completed, including an approximately 6-hour-20-minute interval, with
+normal unlock, input and speaker audio confirmed after the latest wake.
+The previous patched 7.2.9 setup passed one deep-sleep/unlock cycle on
+Omarchy 4.5. See [current kernel status](docs/KERNEL-7.2.11.md).
+
 On the reference machine, the patched driver successfully traversed
 **95 → 496 → 95 → 736 → 750 → 736 → 496 → 750 MHz**, including the previously
 failing intermediate state. Every step produced 12 exact clock samples, with
@@ -31,7 +41,7 @@ have been removed. The separate Titan Ridge investigation is preserved under
 [research/titan-ridge](research/titan-ridge/README.md), outside the active patch
 set. It is not part of the tested Falcon configuration.
 
-## Supported test configuration
+## Original Falcon clock-transition test
 
 | Component | Verified configuration |
 |---|---|
@@ -42,9 +52,10 @@ set. It is not part of the tested Falcon configuration.
 | Panel | AMD eDP, 3072×1920 at 60 Hz |
 | Memory DPM | All four levels available; `auto` restored after testing |
 
-Repeated transitions under load, cold-boot reliability, graphics
-suspend/resume, external displays and other boards/kernel releases remain
-unvalidated with the Falcon candidate. Touch ID is not addressed. Earlier
+Repeated transitions under load, cold-boot reliability and other boards remain
+unvalidated with the Falcon candidate. Later sleep and external-display
+results on 7.2.6 are scoped below; they do not establish general reliability.
+Touch ID is not addressed. Earlier
 sleep/power measurements from the Intel-routing workaround do not describe
 this configuration.
 
@@ -54,13 +65,18 @@ the data alternate at 1 across sleep; native AppleUSBNCMData sets alt 0
 before sleep. That is [patch 0002](docs/T2-NCM-S3.md), independent of
 Falcon.
 
-Hibernation (S4) works with [patch 0003](docs/HIBERNATION.md) for the T2
-BCE drivers and a Limine loader patch. The image-loading kernel's T2
+Historical hibernation (S4) tests used [patch 0003](docs/HIBERNATION.md) for
+the T2 BCE drivers and a Limine loader patch. Hibernation is disabled on the
+current setup; the rebased patch has an unresolved DMA teardown failure path
+and is excluded. The image-loading kernel's T2
 sign-on destroys every firmware queue of the hibernated kernel, so the
 patch rebuilds the T2 transport on restore instead of restoring saved
 state; the loader patch keeps the firmware memory map identical across
-boots. 5/5 real restores on `7.2.6-arch2-Watanare-T2-2-t2`, where the
-Falcon and NCM patches also run unchanged.
+boots. The initial revision passed 5/5 real restores on
+`7.2.6-arch2-Watanare-T2-2-t2`, where Falcon and NCM also run unchanged.
+The later teardown/audio revision passed one real restore; the subsequent
+audio probe-unwind fix is build-checked only. See the validation table before
+attributing older results to the current patch.
 
 A 4K display on Apple's USB-C Digital AV Multiport Adapter was black at
 4K@60: the adapter advertises DSC and 4:2:2 but neither works through it,
@@ -70,8 +86,9 @@ ignore both for that adapter, so 4K@60 falls back to YCbCr 4:2:0 as on macOS.
 ## Use it
 
 1. Read [migration notes](docs/MIGRATION.md) if you installed an older version.
-2. Follow [build and installation instructions](docs/INSTALL.md). Only
-   `amdgpu.ko` needs rebuilding against the exact installed kernel headers.
+2. Follow [build and installation instructions](docs/INSTALL.md) for Falcon
+   and the optional adapter fix in `amdgpu.ko`. The active NCM fix additionally
+   requires rebuilding `cdc_ncm.ko`; see [T2 NCM S3](docs/T2-NCM-S3.md).
 3. Extract the known signed firmware **locally** from your macOS collection
    with [tools/extract-firmware.py](tools/extract-firmware.py). No Apple firmware,
    prebuilt modules or machine-specific boot images are included here.
@@ -84,6 +101,14 @@ measurements, and [T2 NCM S3](docs/T2-NCM-S3.md) for internal Ethernet after
 sleep, [hibernation](docs/HIBERNATION.md) for S4, and
 [external display](docs/EXTERNAL-DISPLAY.md) for the USB-C AV adapter. The old automatic installer is intentionally gone: its global
 clock/routing/service changes do not implement this setup.
+
+See the [2026-10-04 assessment](docs/PATCH-REVIEW-2026-10-04.md) for the
+KAIT2EN changes reviewed that week, the 7.2.8 target and the BCE rebase. The
+[2026-09-27 review](docs/PATCH-REVIEW-2026-09-27.md) records the earlier findings.
+The subsequent [7.2.8 hybrid build](docs/HYBRID.md) includes the refreshed
+KAIT2EN patches and documents the first test image's scope and remaining S4 work.
+The [stock 7.2.9 test](docs/STOCK-7.2.9.md) records why basic boot success
+did not justify removing the patches: the subsequent sleep/login test failed.
 
 ## Licence
 

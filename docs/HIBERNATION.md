@@ -1,18 +1,34 @@
 # Hibernation (S4)
 
-Hibernation works on the reference machine with two independent changes:
+**Current 7.2.11 setup:** hibernation is disabled and patch 0003 is excluded.
+The rebased patch below remains experimental; see the
+[current kernel status](KERNEL-7.2.11.md).
+
+**7.2.8 status:** patch 0003 has been rebased and compiled, but is not
+hardware-validated or included in the first [hybrid test image](HYBRID.md).
+The packaged PCM implementation supersedes the old playback-timer fix.
+The results below describe the historical 7.2.6 revisions; the unresolved
+double-failure teardown path still blocks promoting the new S4 candidate.
+
+Historical 7.2.6 hibernation tests used two independent changes:
 a T2 BCE driver patch and a Limine loader patch. The initial rebuild revision
 passed **5/5 real S4 restores**, the last three from the everyday boot with
-the ESP mounted and no one-time boot selection. The current revision also:
+the ESP mounted and no one-time boot selection. The tested 7.2.6 revision also:
 
 - drops the loading kernel's command queues before memory handoff;
 - keeps the sound card registered across S4;
 - hardens queue teardown (IRQ race, failed unregister);
 - fixes a hard-IRQ sleep in audio playback.
 
-It has passed **one real S4 restore**, with the previous apps, input, the
+That teardown/audio revision passed **one real S4 restore**, with the previous apps, input, the
 PipeWire speaker sink and sound confirmed. The S3 callbacks are unchanged
 except that the audio trigger now handles SUSPEND.
+
+The 2026-09-27 review moves audio transport lock initialization immediately
+after allocation. Previously, device creation, PCI mapping or message-workqueue
+allocation failure could enter `t2audio_bce_destroy()` before its rwsem was
+initialized. This follow-up builds against the same 7.2.6 headers; no new
+hardware restore has been performed with it.
 
 | Patch | Component | What it fixes |
 |---|---|---|
@@ -172,13 +188,16 @@ reproduced the WirePlumber sink loss described above.
 
 ## Not covered
 
-- The current revision has one real restore; the daily-entry series is not
-  repeated yet.
+- The teardown/audio revision has one real restore; the subsequent probe-unwind
+  fix is build-checked only. The daily-entry series is not repeated yet.
 - Queue unregister failure has never occurred on hardware. Its handling
   (quarantine, revoke, writer refusal) is covered only by source-level fault
   injection. If the revoke cannot run (inside a PM callback, or with the
-  mailbox paused), URBs already unlinked by usbcore are still handed back; only
-  S3 paths reach that state.
+  mailbox paused), or the sign-on itself fails, URBs are still handed back
+  despite firmware potentially retaining DMA access. The source does not
+  restrict sign-on failure to S3. Quarantining the queue rings does not retain
+  the caller's URB buffers. This remains an unresolved memory-safety failure
+  path; successful restore tests do not cover it.
 - `t2bce_ave` (video encoder) has no rebuild path yet; it is not loaded on
   the reference machine.
 - The AMD dGPU HDMI audio function logs `CORB reset timeout` after some

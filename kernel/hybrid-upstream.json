@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/kaiT2en/KaiT2en-Fedora",
+  "commit": "ed5a3613a49399a8b426850cdde8c3eaf43f71e9",
+  "t2gmux_source": "modules/t2gmux/t2gmux.c",
+  "t2gmux_sha256": "95f0c945a7fdd725f7381478b85e3c1ae16f7bab8bcea94ef6d40e0e10f9eb1d",
+  "amdgpu_original_sha256": "35d427f47b3122273e2df8234086144c06e05f99b3e7490b37f81b7f2b4f1a3f",
+  "kernel_release": "7.2.8-arch1-Watanare-T2-1-t2",
+  "t2_patches_commit": "65fdd4d492d7e219a05742ce4768f16e5ba4f976"
+}
